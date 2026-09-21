@@ -57,10 +57,31 @@ def test_response_rate():
 
 
 def test_render_table_shape():
-    r = {"a": metrics.summarize([], {}, [], 60), "b": metrics.summarize([], {}, [], 60)}
-    table = metrics.render_table(r)
+    one = metrics.aggregate([metrics.summarize([], {}, [], 60)])
+    table = metrics.render_table({"a": one, "b": one})
     assert table.splitlines()[0] == "| 指标 | a | b |"
     assert len(table.splitlines()) == 2 + len(metrics.METRICS)
+
+
+def run_summary(**overrides):
+    base = metrics.summarize([], {}, [], 60)
+    return {**base, **overrides}
+
+
+def test_aggregate_mean_min_max():
+    agg = metrics.aggregate([run_summary(say_count=10, repetition_rate=0.2), run_summary(say_count=20, repetition_rate=0.4)])
+    assert agg["say_count"] == {"mean": 15.0, "min": 10, "max": 20, "n": 2}
+    assert abs(agg["repetition_rate"]["mean"] - 0.3) < 1e-9
+
+
+def test_table_cells_single_vs_multiple_runs():
+    single = metrics.aggregate([run_summary(say_count=10, repetition_rate=0.25)])
+    multi = metrics.aggregate([run_summary(say_count=10, repetition_rate=0.2), run_summary(say_count=20, repetition_rate=0.4)])
+    t1 = metrics.render_table({"x": single})
+    t2 = metrics.render_table({"x": multi})
+    assert "| 说话次数 | 10 |" in t1 and "| 重复率（越低越好） | 25.0% |" in t1
+    assert "| 说话次数 | 15.0 (10–20) |" in t2
+    assert "| 重复率（越低越好） | 30.0% (20.0%–40.0%) |" in t2
 
 
 # ---------- 仿真 ----------

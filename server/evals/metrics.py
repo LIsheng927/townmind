@@ -123,11 +123,32 @@ METRICS = [
 ]
 
 
+def aggregate(runs: list[dict]) -> dict[str, dict]:
+    """把同一配置的多次运行（每次是一个 summarize 的结果）聚合成 均值/最小/最大。
+    注意：比例类指标是"每次运行各算一个比例，再取平均"，不是把所有话合在一起算。"""
+    out = {}
+    for key, _, _ in METRICS:
+        vals = [r[key] for r in runs]
+        out[key] = {"mean": sum(vals) / len(vals), "min": min(vals), "max": max(vals), "n": len(vals)}
+    return out
+
+
+def _cell(fmt: str, agg: dict) -> str:
+    n = agg["n"]
+    if fmt == "{:d}":  # 整数指标：单次显示整数，多次显示均值（保留一位小数）和整数范围
+        if n == 1:
+            return f"{int(agg['mean'])}"
+        return f"{agg['mean']:.1f} ({agg['min']:.0f}–{agg['max']:.0f})"
+    if n == 1:
+        return fmt.format(agg["mean"])
+    return f"{fmt.format(agg['mean'])} ({fmt.format(agg['min'])}–{fmt.format(agg['max'])})"
+
+
 def render_table(results: dict[str, dict]) -> str:
-    """把多组配置的结果渲染成 Markdown 表格。"""
+    """把多组配置的聚合结果渲染成 Markdown 表格。多次运行时格式是：均值 (最小–最大)。"""
     names = list(results)
     lines = ["| 指标 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
     for key, label, fmt in METRICS:
-        cells = [fmt.format(results[n][key]) for n in names]
+        cells = [_cell(fmt, results[n][key]) for n in names]
         lines.append(f"| {label} | " + " | ".join(cells) + " |")
     return "\n".join(lines)

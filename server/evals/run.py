@@ -1,7 +1,7 @@
 """评测入口。用法（在 server 目录下）：
 
   uv run python -m evals.run --llm offline --minutes 2          # 不花钱，只验证流程
-  uv run python -m evals.run --llm real --minutes 5 --seed 1    # 用 .env 里配置的真实大模型
+  uv run python -m evals.run --llm real --minutes 5 --seeds 1,2,3   # 用 .env 里的真实大模型，跑 3 次取平均
 
 会分别用几种配置跑同一个场景，输出对比表，并把结果存到 evals/results/。
 """
@@ -16,7 +16,7 @@ from townmind.agent import Agent
 from townmind.llm.factory import make_client
 
 from .llm_tools import MeteredLLM, OfflineLLM
-from .metrics import render_table, summarize
+from .metrics import aggregate, render_table, summarize
 from .sim import SimClock, simulate
 
 CONFIGS = {
@@ -54,7 +54,7 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llm", choices=["offline", "real"], default="offline")
     ap.add_argument("--minutes", type=float, default=2.0, help="每个配置模拟多少分钟的小镇时间")
-    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--seeds", default="1", help="用逗号分隔的多个随机种子，每个配置每个种子各跑一次")
     ap.add_argument("--configs", default="full,no_memory,no_lore,no_llm")
     args = ap.parse_args()
 
@@ -63,14 +63,20 @@ async def main() -> None:
     if unknown:
         raise SystemExit(f"未知配置：{unknown}；可选：{list(CONFIGS)}")
 
+    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
     seconds = args.minutes * 60
-    results = {}
+    raw: dict[str, list[dict]] = {}
     for n in names:
-        print(f"[eval] 运行配置 {n} ...", flush=True)
-        results[n] = await run_config(n, args.llm, seconds, args.seed)
+        raw[n] = []
+        for seed in seeds:
+            print(f"[eval] 配置 {n}  seed={seed} ...", flush=True)
+            raw[n].append(await run_config(n, args.llm, seconds, seed))
+    results = {n: aggregate(runs) for n, runs in raw.items()}
 
     table = render_table(results)
-    header = f"llm={args.llm}  模拟时长={args.minutes} 分钟  seed={args.seed}"
+    header = f"llm={args.llm}  每次模拟={args.minutes} 分钟  seeds={seeds}"
+    if len(seeds) > 1:
+        header += "\n多次运行的格式：均值 (最小–最大)。范围很宽说明这个指标噪声大，差别不能轻易当真。"
     if args.llm == "offline":
         header += "\n注意：offline 是假大模型，只验证流程，指标数字没有参考意义。"
     print("\n" + header + "\n\n" + table)
@@ -78,7 +84,8 @@ async def main() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     (RESULTS_DIR / f"{stamp}.json").write_text(
-        json.dumps({"args": vars(args), "results": results}, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps({"args": vars(args), "aggregate": results, "runs": raw}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
     (RESULTS_DIR / f"{stamp}.md").write_text(header + "\n\n" + table + "\n", encoding="utf-8")
     print(f"\n结果已保存到 evals/results/{stamp}.(json|md)")
