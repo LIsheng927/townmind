@@ -19,6 +19,8 @@ class FakeLLM:
 
 
 def decide(agent, npc="alice", obs=None):
+    if npc != "bob":
+        agent.positions.setdefault("bob", (1.0, 1.0))  # 邻居在附近 -> 才算"有事发生"，才会问大模型
     return asyncio.run(agent.decide(npc, obs or {"pos": [0, 0]}))
 
 
@@ -63,3 +65,141 @@ def test_prompt_mentions_nearby_npc():
     decide(a, "bob", {"pos": [1, 1]})
     decide(a, "alice", {"pos": [0, 0]})
     assert "Bob" in llm.last_user
+
+
+# ---------- NPC 之间的对话 ----------
+class ScriptedLLM:
+    """按顺序返回预设的工具调用，并记录每次收到的提示词。"""
+
+    def __init__(self, calls):
+        self.calls = list(calls)
+        self.users = []
+
+    async def choose_tool(self, system, user, tools):
+        self.users.append(user)
+        return self.calls.pop(0)
+
+
+class FakeClock:
+    def __init__(self):
+        self.t = 100.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_nearby_npc_hears_speech():
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("idle", {})])
+    a = Agent(llm)
+    decide(a, "alice", {"pos": [0, 0]})
+    decide(a, "bob", {"pos": [1, 1]})
+    assert "Alice说「早上好」" in llm.users[1]
+
+
+def test_far_npc_does_not_hear_and_llm_not_called():
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("idle", {})])
+    a = Agent(llm)
+    decide(a, "alice", {"pos": [0, 0]})
+    decide(a, "bob", {"pos": [7, 7]})
+    assert len(llm.users) == 1  # bob 附近没人、也没听到话 -> 没有调用大模型
+    assert a.stats["rule"] == 1
+
+
+def test_speech_heard_only_once():
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("idle", {}), ToolCall("idle", {})])
+    a = Agent(llm)
+    decide(a, "alice", {"pos": [0, 0]})
+    decide(a, "bob", {"pos": [1, 1]})
+    decide(a, "bob", {"pos": [1, 1]})
+    assert "你刚听到" in llm.users[1]
+    assert "你刚听到" not in llm.users[2]
+
+
+def test_old_speech_expires():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("idle", {})])
+    a = Agent(llm, clock=clock)
+    decide(a, "alice", {"pos": [0, 0]})
+    clock.t += 60
+    decide(a, "bob", {"pos": [1, 1]})
+    assert "你刚听到" not in llm.users[1]
+
+
+def test_cooldown_waits_in_place_without_calling_llm():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "一"}), ToolCall("say", {"text": "三"})])
+    a = Agent(llm, clock=clock)
+    assert decide(a)["name"] == "say"
+    clock.t += 1  # 冷却期内
+    r = decide(a)
+    assert r["name"] == "idle" and 1.0 <= r["seconds"] <= 6.0  # 原地等对方回应
+    assert len(llm.users) == 1  # 没有为一句注定说不了的话花钱
+    clock.t += 10  # 冷却结束
+    assert decide(a)["name"] == "say"
+    assert len(llm.users) == 2
+
+
+def test_chat_cap_makes_npc_walk_away():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": str(i)}) for i in range(10)])
+    a = Agent(llm, clock=clock)
+    for _ in range(3):  # 30 秒窗口内说满 3 句
+        assert decide(a)["name"] == "say"
+        clock.t += 7
+    calls_before = len(llm.users)
+    r = decide(a)  # 第 4 句：已聊够，不再问大模型，走开
+    assert r["name"] in ("idle", "move_to")
+    assert len(llm.users) == calls_before
+
+
+def test_nothing_nearby_uses_rules_not_llm():
+    llm = ScriptedLLM([])
+    a = Agent(llm)
+    r = asyncio.run(a.decide("alice", {"pos": [0, 0]}))  # 世界里只有 alice 自己
+    assert r["name"] in ("idle", "move_to")
+    assert llm.users == [] and a.stats["llm_calls"] == 0
+
+
+def test_stats_count_llm_calls_and_failures():
+    a = Agent(FakeLLM(exc=RuntimeError("boom")))
+    decide(a)
+    assert a.stats["llm_calls"] == 1 and a.stats["llm_failures"] == 1 and a.stats["fallback"] == 1
+
+
+def test_end_conversation_becomes_farewell_then_walks_away():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("end_conversation", {"farewell": "再见！"}), ToolCall("say", {"text": "不该被问到"})])
+    a = Agent(llm, clock=clock)
+    assert decide(a) == {"name": "say", "text": "再见！"}  # 对 Unity 来说就是说了一句话
+    assert a.stats["ended_conversations"] == 1
+    clock.t += 7  # 冷却已过，但还在"离开"状态
+    r = decide(a)
+    assert r["name"] in ("idle", "move_to")
+    assert len(llm.users) == 1  # 没再问大模型
+    clock.t += 30  # 离开状态结束
+    a.llm = ScriptedLLM([ToolCall("idle", {})])
+    decide(a)
+    assert len(a.llm.users) == 1  # 又恢复了正常决策
+
+
+def test_farewell_is_heard_by_neighbor():
+    llm = ScriptedLLM([ToolCall("end_conversation", {"farewell": "我先走了"}), ToolCall("idle", {})])
+    a = Agent(llm)
+    decide(a, "alice", {"pos": [0, 0]})
+    decide(a, "bob", {"pos": [1, 1]})
+    assert "我先走了" in llm.users[1]
+
+
+def test_prompt_tells_how_many_lines_already_said():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"}), ToolCall("idle", {})])
+    a = Agent(llm, clock=clock)
+    decide(a)
+    clock.t += 7
+    decide(a)
+    assert "已经说了 1 句话" in llm.users[1]
+
+
+def test_empty_farewell_falls_back():
+    a = Agent(FakeLLM(ToolCall("end_conversation", {"farewell": ""})))
+    assert decide(a)["name"] == "move_to"

@@ -20,6 +20,12 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/stats")
+async def stats() -> dict:
+    """决策统计：大模型调用次数、失败次数、规则决策次数。用于观察成本。"""
+    return dict(app.state.agent.stats)
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()

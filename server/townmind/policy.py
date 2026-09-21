@@ -15,3 +15,11 @@ def decide(npc_id: str, observation: dict, rng: random.Random | None = None) -> 
         "x": round(rng.uniform(-WORLD_HALF_SIZE, WORLD_HALF_SIZE), 2),
         "z": round(rng.uniform(-WORLD_HALF_SIZE, WORLD_HALF_SIZE), 2),
     }
+
+
+def wander(rng: random.Random | None = None) -> dict:
+    """没什么事发生时的日常闲逛：一部分时间原地待着，其余时间随机走走。不调用大模型，零成本。"""
+    rng = rng or random
+    if rng.random() < 0.4:
+        return {"name": "idle", "seconds": round(rng.uniform(2, 5), 1)}
+    return decide("", {}, rng)

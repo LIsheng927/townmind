@@ -1,9 +1,16 @@
 """NPC 的大脑：感知 -> 让 LLM 通过工具调用做决策 -> 校验 -> 返回动作。
-任何环节失败（无 LLM、超时、报错、参数非法）都退回规则策略，保证 NPC 永远有动作可做。"""
+任何环节失败（无 LLM、超时、报错、参数非法）都退回规则策略，保证 NPC 永远有动作可做。
+
+NPC 之间的对话：某个 NPC 说话时，服务端把这句话记成一条"说话事件"（谁、在哪、说了什么）。
+其他 NPC 下次决策时，如果当时就在附近，这句话会被写进它的提示词，它就"听到"了，
+大模型据此决定是否回应。整个对话由大模型逐句生成，没有任何预设台词。"""
 import asyncio
 import logging
 import math
+import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
+from typing import Callable
 
 from pydantic import BaseModel, Field
 
@@ -13,7 +20,12 @@ from .personas import DEFAULT_PERSONA, PERSONAS
 
 log = logging.getLogger("townmind.agent")
 HALF = policy.WORLD_HALF_SIZE
-NEARBY_RADIUS = 5.0
+NEARBY_RADIUS = 5.0  # 这个距离内算"附近"，也是能听到说话的距离
+EVENT_TTL = 30.0  # 说话事件的有效期（秒），太久以前的话不再被听到
+SAY_COOLDOWN = 6.0  # 同一个 NPC 两次说话的最短间隔（秒）
+CHAT_WINDOW = 30.0  # 统计"最近说了几句"的时间窗口（秒）
+DISENGAGE_SECONDS = 20.0  # 道别之后这么久内不再和人搭话，走去忙自己的事
+MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
 
 
 class MoveTo(BaseModel):
@@ -29,11 +41,21 @@ class Idle(BaseModel):
     seconds: float = Field(default=3, ge=0, le=10, description="原地停留的秒数")
 
 
-ARG_MODELS: dict[str, type[BaseModel]] = {"move_to": MoveTo, "say": Say, "idle": Idle}
+class EndConversation(BaseModel):
+    farewell: str = Field(min_length=1, max_length=60, description="道别的话，不超过 30 个字")
+
+
+ARG_MODELS: dict[str, type[BaseModel]] = {
+    "move_to": MoveTo,
+    "say": Say,
+    "idle": Idle,
+    "end_conversation": EndConversation,
+}
 TOOL_DESCRIPTIONS = {
     "move_to": "走到小镇里的某个位置",
-    "say": "说一句话（头顶会显示对话气泡）",
+    "say": "说一句话（头顶会显示对话气泡，附近的人能听到）",
     "idle": "原地休息一会儿",
+    "end_conversation": "结束当前的对话：说一句道别的话，然后走开去忙自己的事",
 }
 TOOLS = [
     {"name": n, "description": TOOL_DESCRIPTIONS[n], "parameters": m.model_json_schema()}
@@ -41,33 +63,138 @@ TOOLS = [
 ]
 
 
+@dataclass
+class SpeechEvent:
+    id: int
+    speaker: str
+    pos: tuple[float, float]  # 说话时说话者所在的位置
+    text: str
+    time: float
+
+
+def _name(npc_id: str) -> str:
+    return PERSONAS.get(npc_id, DEFAULT_PERSONA)["name"]
+
+
 class Agent:
-    def __init__(self, llm: LLMClient | None, timeout: float = 8.0) -> None:
+    def __init__(self, llm: LLMClient | None, timeout: float = 8.0, clock: Callable[[], float] = time.monotonic) -> None:
         self.llm = llm
         self.timeout = timeout
+        self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
-        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=3))
+        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=6))
+        self.events: deque[SpeechEvent] = deque(maxlen=50)
+        self._next_event_id = 1
+        self.last_heard: dict[str, int] = defaultdict(int)  # 每个 NPC 已经处理到的事件 id
+        self.last_said: dict[str, float] = {}
+        self.say_times: dict[str, deque[float]] = defaultdict(deque)
+        self.disengaged_until: dict[str, float] = {}  # 道别后，在这个时间点之前不再搭话
+        # 决策统计：用来观察成本，也是后面评测框架的基础
+        self.stats: dict[str, int] = defaultdict(int)
 
     async def decide(self, npc_id: str, observation: dict) -> dict:
         pos = observation.get("pos")
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
             self.positions[npc_id] = (float(pos[0]), float(pos[1]))
 
+        now = self.clock()
+        heard = self._collect_heard(npc_id, now)  # 先取走"听到的话"
+        nearby = self._nearby(npc_id)
+        interesting = bool(heard or nearby)  # 有人在附近或刚听到话，才算"有事发生"
+        status = self._say_status(npc_id, now)
+
         action, source = None, "fallback"
         if self.llm is not None:
-            system, user = self._build_prompt(npc_id)
-            try:
-                call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
-                action = self._validate(call)
-                source = "llm"
-            except Exception as e:  # 超时/网络/参数非法都走兜底
-                log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
+            if interesting and status == "ok":
+                # 只有这一种情况才花钱问大模型
+                action, source = await self._ask_llm(npc_id, heard, nearby)
+            elif interesting and status == "cooldown":
+                # 刚说过话，还不能再说：原地等对方回应，而不是走开
+                wait = SAY_COOLDOWN - (now - self.last_said[npc_id])
+                action, source = {"name": "idle", "seconds": round(max(1.0, min(wait, 10.0)), 1)}, "rule"
+            else:
+                # 没事发生，或者这场对话已经聊够了：走走停停，不调用大模型
+                action, source = policy.wander(), "rule"
 
         if action is None:
-            action = policy.decide(npc_id, observation)
+            action, source = policy.decide(npc_id, observation), "fallback"
+
+        ended = action["name"] == "end_conversation"
+        if ended:
+            # Unity 只认识 say/move_to/idle，所以这里把它翻译成"说一句道别"，
+            # 同时让服务端记住：这个 NPC 接下来一阵子要走开，不再问大模型。
+            self.stats["ended_conversations"] += 1
+            self.disengaged_until[npc_id] = now + DISENGAGE_SECONDS
+            action = {"name": "say", "text": action["farewell"]}
+
+        self.stats[source] += 1
+        if action["name"] == "say":
+            self._record_speech(npc_id, action["text"], now)
+
+        for e in heard:
+            self.history[npc_id].append(f"听到{_name(e.speaker)}说「{e.text}」")
         self.history[npc_id].append(self._describe(action))
-        log.info("[%s] %s -> %s", npc_id, source, action)
+        log.info("[%s] %s -> %s%s", npc_id, source, action, "  (end_conversation)" if ended else "")
         return action
+
+    async def _ask_llm(self, npc_id: str, heard: list["SpeechEvent"], nearby: list[tuple[str, float]]):
+        system, user = self._build_prompt(npc_id, heard, nearby)
+        self.stats["llm_calls"] += 1
+        try:
+            call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
+            return self._validate(call), "llm"
+        except Exception as e:  # 超时/网络/参数非法都走兜底
+            self.stats["llm_failures"] += 1
+            log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
+            return None, "fallback"
+
+    def _say_status(self, npc_id: str, now: float) -> str:
+        """ok：可以说话；cooldown：刚说过，稍等；capped：这一阵说得够多了，该走开；
+        away：已经主动道别，正在走开。"""
+        if now < self.disengaged_until.get(npc_id, 0.0):
+            return "away"
+        times = self.say_times[npc_id]
+        while times and now - times[0] > CHAT_WINDOW:
+            times.popleft()
+        if len(times) >= MAX_SAYS_PER_WINDOW:
+            return "capped"
+        last = self.last_said.get(npc_id)
+        if last is not None and now - last < SAY_COOLDOWN:
+            return "cooldown"
+        return "ok"
+
+    def _nearby(self, npc_id: str) -> list[tuple[str, float]]:
+        me = self.positions.get(npc_id)
+        if me is None:
+            return []
+        return [
+            (o, math.dist(me, pos))
+            for o, pos in self.positions.items()
+            if o != npc_id and math.dist(me, pos) <= NEARBY_RADIUS
+        ]
+
+    def _record_speech(self, npc_id: str, text: str, now: float) -> None:
+        pos = self.positions.get(npc_id, (0.0, 0.0))
+        self.events.append(SpeechEvent(self._next_event_id, npc_id, pos, text, now))
+        self._next_event_id += 1
+        self.last_said[npc_id] = now
+        self.say_times[npc_id].append(now)
+
+    def _collect_heard(self, npc_id: str, now: float) -> list[SpeechEvent]:
+        me = self.positions.get(npc_id)
+        heard: list[SpeechEvent] = []
+        if me is not None:
+            for e in self.events:
+                if (
+                    e.speaker != npc_id
+                    and e.id > self.last_heard[npc_id]
+                    and now - e.time <= EVENT_TTL
+                    and math.dist(me, e.pos) <= NEARBY_RADIUS
+                ):
+                    heard.append(e)
+        # 无论听没听到，都把指针推到最新：走远的人事后不会"补听"以前的话
+        self.last_heard[npc_id] = self._next_event_id - 1
+        return heard
 
     @staticmethod
     def _validate(call: ToolCall) -> dict:
@@ -84,24 +211,28 @@ class Agent:
             return f"说了「{action['text']}」"
         return "休息了一会儿"
 
-    def _build_prompt(self, npc_id: str) -> tuple[str, str]:
+    def _build_prompt(self, npc_id: str, heard: list[SpeechEvent], nearby: list[tuple[str, float]]) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         system = (
             f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}\n"
             f"小镇是一块平地，坐标 x、z 的范围都是 -{HALF} 到 {HALF}。\n"
-            "每次你必须调用一个工具来决定下一步行动。"
-            f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。"
+            "每次你必须调用一个工具来决定下一步行动。\n"
+            f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。\n"
+            "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。\n"
+            "话题聊完了、或者已经聊了三四句，就用 end_conversation 道别并走开去忙自己的事，不要一直聊下去。"
         )
         me = self.positions.get(npc_id, (0.0, 0.0))
-        nearby = [
-            f"{PERSONAS.get(o, DEFAULT_PERSONA)['name']}（距离 {math.dist(me, pos):.1f} 米）"
-            for o, pos in self.positions.items()
-            if o != npc_id and math.dist(me, pos) <= NEARBY_RADIUS
-        ]
+        nearby_text = [f"{_name(o)}（距离 {d:.1f} 米）" for o, d in nearby]
         recent = "；".join(self.history[npc_id]) or "无"
-        user = (
-            f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})\n"
-            f"附近的人：{'、'.join(nearby) if nearby else '没有人'}\n"
-            f"你最近做过的事：{recent}\n请决定下一步。"
-        )
-        return system, user
+        lines = [
+            f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})",
+            f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",
+            f"你最近经历的事：{recent}",
+        ]
+        said = len(self.say_times[npc_id])
+        if said:
+            lines.append(f"你在最近 {CHAT_WINDOW:.0f} 秒内已经说了 {said} 句话（最多 {MAX_SAYS_PER_WINDOW} 句）。")
+        if heard:
+            lines.append("你刚听到：" + "；".join(f"{_name(e.speaker)}说「{e.text}」" for e in heard))
+        lines.append("请决定下一步。")
+        return system, "\n".join(lines)
