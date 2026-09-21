@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
 
+from townmind.agent import Agent
 from townmind.main import app
 
+app.state.agent = Agent(None)  # 测试不调用真实 LLM，走规则兜底
 client = TestClient(app)
 
 

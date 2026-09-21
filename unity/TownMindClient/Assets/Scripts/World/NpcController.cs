@@ -19,7 +19,9 @@ namespace TownMind.World
         private bool _awaitingAction;
         private float _nextReportTime;
         private float _requestSentTime;
-        private const float ReplyTimeout = 5f;
+        private const float ReplyTimeout = 12f; // 要大于服务端 LLM 超时(8s)
+        private TextMesh _speech;
+        private float _speechExpire;
 
         public void Init(string id, TownClient client)
         {
@@ -59,6 +61,33 @@ namespace TownMind.World
             }
         }
 
+        private void ShowSpeech(string text)
+        {
+            if (_speech != null) Destroy(_speech.gameObject);
+            var go = new GameObject("Speech");
+            go.transform.SetParent(transform, false);
+            go.transform.localPosition = new Vector3(0, 1.2f, 0);
+            _speech = go.AddComponent<TextMesh>();
+            _speech.text = text;
+            _speech.characterSize = 0.12f;
+            _speech.fontSize = 48;
+            _speech.anchor = TextAnchor.LowerCenter;
+            _speech.alignment = TextAlignment.Center;
+            _speech.color = Color.white;
+            // Unity 内置字体不含中文，改用系统字体（Windows 上是微软雅黑）
+            var font = Font.CreateDynamicFontFromOSFont(new[] { "Microsoft YaHei", "SimHei", "Arial" }, 48);
+            _speech.font = font;
+            go.GetComponent<MeshRenderer>().material = font.material;
+            _speechExpire = Time.time + 4f;
+        }
+
+        private void LateUpdate()
+        {
+            if (_speech == null) return;
+            if (Time.time > _speechExpire) { Destroy(_speech.gameObject); return; }
+            if (Camera.main != null) _speech.transform.rotation = Camera.main.transform.rotation; // 始终朝向相机
+        }
+
         private async void SendObservation(Vector3 p)
         {
             var ok = await _client.Send(new Envelope
@@ -77,11 +106,23 @@ namespace TownMind.World
             _nextReportTime = Time.time + 1f; // 到达后停 1 秒再要新指令
 
             var name = Convert.ToString(msg.Payload["name"]);
-            if (name == "move_to")
+            switch (name)
             {
-                var x = Convert.ToSingle(msg.Payload["x"]);
-                var z = Convert.ToSingle(msg.Payload["z"]);
-                _target = new Vector3(x, transform.position.y, z);
+                case "move_to":
+                    var x = Convert.ToSingle(msg.Payload["x"]);
+                    var z = Convert.ToSingle(msg.Payload["z"]);
+                    _target = new Vector3(x, transform.position.y, z);
+                    break;
+                case "say":
+                    ShowSpeech(Convert.ToString(msg.Payload["text"]));
+                    _nextReportTime = Time.time + 3f; // 说话期间先别急着要下一步
+                    break;
+                case "idle":
+                    _nextReportTime = Time.time + Convert.ToSingle(msg.Payload["seconds"]);
+                    break;
+                default:
+                    Debug.LogWarning($"[{NpcId}] unknown action {name}");
+                    break;
             }
         }
     }
