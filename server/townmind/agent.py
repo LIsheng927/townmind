@@ -100,6 +100,7 @@ class Agent:
         use_memory: bool = True,  # 评测时可关闭，做消融对比
         use_lore: bool = True,
         breaker: CircuitBreaker | None = None,
+        max_concurrent_llm: int = 4,  # 同一时刻最多有几个大模型请求在路上
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -108,6 +109,8 @@ class Agent:
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
+        self._llm_slots = asyncio.Semaphore(max_concurrent_llm)
+        self._in_flight = 0
         self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
         self.memory_dir = memory_dir  # 为 None 时记忆只存在内存里（测试用）
@@ -189,7 +192,13 @@ class Agent:
         system, user = self._build_prompt(npc_id, heard, nearby, recalled, now)
         self.stats["llm_calls"] += 1
         try:
-            call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
+            async with self._llm_slots:  # 限流：名额满了就排队，排队的时间不算进超时
+                self._in_flight += 1
+                self.stats["max_in_flight"] = max(self.stats["max_in_flight"], self._in_flight)
+                try:
+                    call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
+                finally:
+                    self._in_flight -= 1
         except Exception as e:  # 超时/网络/鉴权失败：服务本身有问题，计入熔断
             self.breaker.record_failure()
             self.stats["llm_failures"] += 1

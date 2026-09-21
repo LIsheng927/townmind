@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen
+      - name: Unit tests
+        run: uv run pytest -q
+      # 用假大模型跑一遍评测流程，确保评测代码不会悄悄坏掉（不联网、不花钱）
+      - name: Eval smoke test (offline LLM)
+        run: |
+          uv run python -m evals.run --llm offline --minutes 1
+          uv run python -m evals.probes --llm offline --repeats 1
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image and check /health
+        run: |
+          docker build -t townmind-server ./server
+          docker run -d --name tm -p 8000:8000 townmind-server
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:8000/health && exit 0; sleep 1; done
+          docker logs tm; exit 1

@@ -1,0 +1,16 @@
+# 一条命令启动服务端：docker compose up --build
+# key 从当前终端的环境变量读取，不会被写进镜像：
+#   PowerShell:  $env:OPENAI_API_KEY="sk-..."; $env:TOWNMIND_LLM_PROVIDER="openai"
+services:
+  server:
+    build: ./server
+    ports:
+      - "8000:8000"
+    environment:
+      - TOWNMIND_LLM_PROVIDER
+      - OPENAI_API_KEY
+      - ANTHROPIC_API_KEY
+    volumes:
+      - townmind-data:/data
+volumes:
+  townmind-data:

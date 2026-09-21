@@ -93,3 +93,31 @@ def test_invalid_arguments_do_not_trip_breaker():
     a = Agent(Bad(), clock=c, breaker=CircuitBreaker(threshold=1, clock=c))
     run(a)
     assert a.breaker.state == "closed" and a.stats["llm_failures"] == 1
+
+
+def test_concurrency_limit_caps_in_flight_requests():
+    class Slow:
+        def __init__(self):
+            self.now = 0
+            self.peak = 0
+
+        async def choose_tool(self, system, user, tools):
+            self.now += 1
+            self.peak = max(self.peak, self.now)
+            await asyncio.sleep(0.02)
+            self.now -= 1
+            return ToolCall("idle", {})
+
+    llm = Slow()
+    c = Clock()
+    a = Agent(llm, clock=c, max_concurrent_llm=2)
+    ids = [f"n{i}" for i in range(8)]
+    for i, n in enumerate(ids):
+        a.update_position(n, [i * 0.1, 0.0])  # 都挤在一起，彼此都在附近
+
+    async def go():
+        return await asyncio.gather(*(a.decide(n, {"pos": [0, 0]}) for n in ids))
+
+    results = asyncio.run(go())
+    assert len(results) == 8 and llm.peak == 2 and a.stats["max_in_flight"] == 2
+    assert a.stats["llm_calls"] == 8  # 排队的请求最终都会被处理，不会丢
