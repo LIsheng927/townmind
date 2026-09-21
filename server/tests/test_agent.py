@@ -250,3 +250,9 @@ def test_idle_is_not_worth_remembering():
     a = Agent(FakeLLM(ToolCall("idle", {})))
     decide(a)
     assert not any("休息" in t for t in texts(a))
+
+
+def test_walking_is_not_worth_remembering():
+    a = Agent(FakeLLM(ToolCall("move_to", {"x": 1, "z": 2})))
+    decide(a)
+    assert not any("走到" in t for t in texts(a))

@@ -33,7 +33,7 @@ IMPORTANCE_MET = 8  # 第一次见到某人
 IMPORTANCE_HEARD = 6  # 别人对我说的话
 IMPORTANCE_FAREWELL = 5
 IMPORTANCE_SAID = 4  # 我自己说的话
-IMPORTANCE_MOVED = 1  # 走路；"休息"不值得记，所以不存
+# 走路和休息不值得记：占位置、没信息量，所以不存
 MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
 
 
@@ -196,8 +196,6 @@ class Agent:
                 store.add(f"你{to}道别：「{action['text']}」", IMPORTANCE_FAREWELL, now, near_ids)
             else:
                 store.add(f"你{to}说了「{action['text']}」", IMPORTANCE_SAID, now, near_ids)
-        elif action["name"] == "move_to":
-            store.add(f"你走到了 ({action['x']}, {action['z']})", IMPORTANCE_MOVED, now)
         path = self._memory_path(npc_id)
         if path is not None:
             try:
