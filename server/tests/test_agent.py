@@ -8,9 +8,11 @@ class FakeLLM:
     def __init__(self, call=None, exc=None, delay=0.0):
         self.call, self.exc, self.delay = call, exc, delay
         self.last_user = ""
+        self.last_system = ""
 
     async def choose_tool(self, system, user, tools):
         self.last_user = user
+        self.last_system = system
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.exc:
@@ -322,3 +324,12 @@ def test_update_position_changes_who_is_nearby():
     assert [n for n, _ in a._nearby("alice")] == ["bob"]
     a.update_position("bob", "garbage")  # 非法数据被忽略，不崩
     assert a.positions["bob"] == (2.0, 0.0)
+
+
+def test_prompt_says_lore_beats_memory_only_with_lore():
+    llm = FakeLLM(ToolCall("idle", {}))
+    decide(Agent(llm, use_lore=True))
+    assert "以设定为准" in llm.last_system
+    llm2 = FakeLLM(ToolCall("idle", {}))
+    decide(Agent(llm2, use_lore=False))
+    assert "以设定为准" not in llm2.last_system

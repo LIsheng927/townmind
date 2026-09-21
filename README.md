@@ -5,7 +5,7 @@ LLM 驱动的 AI NPC 系统：**Unity 小镇（身体）+ Python Agent 服务端
 
 ![CI](https://github.com/LIsheng927/townmind/actions/workflows/ci.yml/badge.svg)
 
-<!-- TODO: 放一张 Unity 运行截图或 GIF：docs/demo.gif -->
+![Unity 小镇：三个 NPC 各在自己的位置，头顶是大模型逐句生成的对话](docs/demo.png)
 
 ## 架构
 
