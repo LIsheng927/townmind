@@ -18,6 +18,7 @@ from typing import Callable, Literal
 from pydantic import BaseModel, Field
 
 from . import fallback, policy, world
+from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
 from .memory import Memory, MemoryStore, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
@@ -98,6 +99,7 @@ class Agent:
         rng: random.Random | None = None,
         use_memory: bool = True,  # 评测时可关闭，做消融对比
         use_lore: bool = True,
+        breaker: CircuitBreaker | None = None,
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -105,6 +107,7 @@ class Agent:
         self.use_lore = use_lore
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
+        self.breaker = breaker or CircuitBreaker(clock=clock)
         self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
         self.memory_dir = memory_dir  # 为 None 时记忆只存在内存里（测试用）
@@ -179,16 +182,27 @@ class Agent:
         return action
 
     async def _ask_llm(self, npc_id, heard, nearby, recalled, now):
+        if not self.breaker.allow():
+            # 熔断中：大模型服务最近连续出问题，直接走兜底，不发请求
+            self.stats["breaker_skipped"] += 1
+            return None, "fallback"
         system, user = self._build_prompt(npc_id, heard, nearby, recalled, now)
         self.stats["llm_calls"] += 1
         try:
             call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
-            self.stats["tokens_in"] += call.input_tokens  # 先记账再校验：校验失败的调用也是花了钱的
-            self.stats["tokens_out"] += call.output_tokens
-            return self._validate(call), "llm"
-        except Exception as e:  # 超时/网络/参数非法都走兜底
+        except Exception as e:  # 超时/网络/鉴权失败：服务本身有问题，计入熔断
+            self.breaker.record_failure()
             self.stats["llm_failures"] += 1
             log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
+            return None, "fallback"
+        self.breaker.record_success()  # 服务是通的；下面参数不合法只是这次回答不好，不算服务故障
+        self.stats["tokens_in"] += call.input_tokens  # 先记账再校验：校验失败的调用也是花了钱的
+        self.stats["tokens_out"] += call.output_tokens
+        try:
+            return self._validate(call), "llm"
+        except Exception as e:
+            self.stats["llm_failures"] += 1
+            log.warning("[%s] LLM returned invalid call (%s: %s), using fallback", npc_id, type(e).__name__, e)
             return None, "fallback"
 
     def _fallback(self, npc_id: str, heard, nearby, status: str) -> dict:

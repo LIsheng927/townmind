@@ -34,7 +34,7 @@ async def memories(npc_id: str) -> list[dict]:
 @app.get("/stats")
 async def stats() -> dict:
     """决策统计：大模型调用次数、失败次数、规则决策次数。用于观察成本。"""
-    return dict(app.state.agent.stats)
+    return {**app.state.agent.stats, "breaker": app.state.agent.breaker.state}
 
 
 @app.websocket("/ws")
