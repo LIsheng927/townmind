@@ -203,3 +203,50 @@ def test_prompt_tells_how_many_lines_already_said():
 def test_empty_farewell_falls_back():
     a = Agent(FakeLLM(ToolCall("end_conversation", {"farewell": ""})))
     assert decide(a)["name"] == "move_to"
+
+
+# ---------- 记忆 ----------
+def texts(agent, npc="alice"):
+    return [m.text for m in agent._mem(npc).memories]
+
+
+def test_first_meeting_is_remembered_only_once():
+    a = Agent(FakeLLM(ToolCall("idle", {})))
+    decide(a)
+    decide(a)
+    assert sum("第一次见到Bob" in t for t in texts(a)) == 1
+    assert "bob" in a._mem("alice").met
+
+
+def test_recalled_memory_appears_in_next_prompt():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"}), ToolCall("idle", {})])
+    a = Agent(llm, clock=clock)
+    decide(a)
+    clock.t += 7
+    decide(a)
+    assert "你想起了" in llm.users[1]
+    assert "你对Bob说了「你好」" in llm.users[1]
+
+
+def test_heard_speech_becomes_important_memory_about_speaker():
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("idle", {})])
+    a = Agent(llm)
+    decide(a, "alice", {"pos": [0, 0]})
+    decide(a, "bob", {"pos": [1, 1]})
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert len(heard) == 1 and heard[0].people == frozenset({"alice"}) and heard[0].importance == 6
+
+
+def test_memory_survives_restart(tmp_path):
+    a1 = Agent(FakeLLM(ToolCall("idle", {})), memory_dir=tmp_path)
+    decide(a1)
+    a2 = Agent(None, memory_dir=tmp_path)  # 模拟服务重启
+    assert any("第一次见到Bob" in t for t in texts(a2))
+    assert "bob" in a2._mem("alice").met
+
+
+def test_idle_is_not_worth_remembering():
+    a = Agent(FakeLLM(ToolCall("idle", {})))
+    decide(a)
+    assert not any("休息" in t for t in texts(a))

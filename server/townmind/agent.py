@@ -7,15 +7,18 @@ NPC 之间的对话：某个 NPC 说话时，服务端把这句话记成一条"�
 import asyncio
 import logging
 import math
+import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 
 from pydantic import BaseModel, Field
 
 from . import policy
 from .llm.base import LLMClient, ToolCall
+from .memory import Memory, MemoryStore, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
 
 log = logging.getLogger("townmind.agent")
@@ -25,6 +28,12 @@ EVENT_TTL = 30.0  # 说话事件的有效期（秒），太久以前的话不再
 SAY_COOLDOWN = 6.0  # 同一个 NPC 两次说话的最短间隔（秒）
 CHAT_WINDOW = 30.0  # 统计"最近说了几句"的时间窗口（秒）
 DISENGAGE_SECONDS = 20.0  # 道别之后这么久内不再和人搭话，走去忙自己的事
+# 记忆的重要度（1-10）：第一版用简单规则打分
+IMPORTANCE_MET = 8  # 第一次见到某人
+IMPORTANCE_HEARD = 6  # 别人对我说的话
+IMPORTANCE_FAREWELL = 5
+IMPORTANCE_SAID = 4  # 我自己说的话
+IMPORTANCE_MOVED = 1  # 走路；"休息"不值得记，所以不存
 MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
 
 
@@ -77,12 +86,19 @@ def _name(npc_id: str) -> str:
 
 
 class Agent:
-    def __init__(self, llm: LLMClient | None, timeout: float = 8.0, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        llm: LLMClient | None,
+        timeout: float = 8.0,
+        clock: Callable[[], float] = time.time,  # 用真实时间：记忆要能跨重启，monotonic 重启后会归零
+        memory_dir: Path | None = None,
+    ) -> None:
         self.llm = llm
         self.timeout = timeout
         self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
-        self.history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=6))
+        self.memory_dir = memory_dir  # 为 None 时记忆只存在内存里（测试用）
+        self._memories: dict[str, MemoryStore] = {}
         self.events: deque[SpeechEvent] = deque(maxlen=50)
         self._next_event_id = 1
         self.last_heard: dict[str, int] = defaultdict(int)  # 每个 NPC 已经处理到的事件 id
@@ -102,12 +118,15 @@ class Agent:
         nearby = self._nearby(npc_id)
         interesting = bool(heard or nearby)  # 有人在附近或刚听到话，才算"有事发生"
         status = self._say_status(npc_id, now)
+        # 回忆：只取和眼前的人最相关、最重要、最新的几条。要在写入本轮新记忆之前取，避免"想起"刚发生的事
+        involved = {o for o, _ in nearby} | {e.speaker for e in heard}
+        recalled = self._mem(npc_id).recall(involved, now)
 
         action, source = None, "fallback"
         if self.llm is not None:
             if interesting and status == "ok":
                 # 只有这一种情况才花钱问大模型
-                action, source = await self._ask_llm(npc_id, heard, nearby)
+                action, source = await self._ask_llm(npc_id, heard, nearby, recalled, now)
             elif interesting and status == "cooldown":
                 # 刚说过话，还不能再说：原地等对方回应，而不是走开
                 wait = SAY_COOLDOWN - (now - self.last_said[npc_id])
@@ -131,14 +150,12 @@ class Agent:
         if action["name"] == "say":
             self._record_speech(npc_id, action["text"], now)
 
-        for e in heard:
-            self.history[npc_id].append(f"听到{_name(e.speaker)}说「{e.text}」")
-        self.history[npc_id].append(self._describe(action))
+        self._remember(npc_id, now, heard, nearby, action, ended)
         log.info("[%s] %s -> %s%s", npc_id, source, action, "  (end_conversation)" if ended else "")
         return action
 
-    async def _ask_llm(self, npc_id: str, heard: list["SpeechEvent"], nearby: list[tuple[str, float]]):
-        system, user = self._build_prompt(npc_id, heard, nearby)
+    async def _ask_llm(self, npc_id, heard, nearby, recalled, now):
+        system, user = self._build_prompt(npc_id, heard, nearby, recalled, now)
         self.stats["llm_calls"] += 1
         try:
             call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
@@ -147,6 +164,49 @@ class Agent:
             self.stats["llm_failures"] += 1
             log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
             return None, "fallback"
+
+    # ---------- 记忆 ----------
+    def _memory_path(self, npc_id: str) -> Path | None:
+        if self.memory_dir is None:
+            return None
+        return self.memory_dir / (re.sub(r"[^A-Za-z0-9_-]", "_", npc_id) + ".json")
+
+    def _mem(self, npc_id: str) -> MemoryStore:
+        store = self._memories.get(npc_id)
+        if store is None:
+            path = self._memory_path(npc_id)
+            store = MemoryStore.load(path) if path else MemoryStore()
+            self._memories[npc_id] = store
+        return store
+
+    def _remember(self, npc_id, now, heard, nearby, action, ended) -> None:
+        """把这一轮发生的事写进记忆，并给每条打上重要度。"""
+        store = self._mem(npc_id)
+        for e in heard:
+            store.add(f"{_name(e.speaker)}对你说：「{e.text}」", IMPORTANCE_HEARD, now, {e.speaker})
+        for o, _ in nearby:
+            if o not in store.met:
+                store.met.add(o)
+                store.add(f"你第一次见到{_name(o)}", IMPORTANCE_MET, now, {o})
+        near_ids = {o for o, _ in nearby}
+        names = "、".join(_name(o) for o in sorted(near_ids))
+        if action["name"] == "say":
+            to = f"对{names}" if names else ""
+            if ended:
+                store.add(f"你{to}道别：「{action['text']}」", IMPORTANCE_FAREWELL, now, near_ids)
+            else:
+                store.add(f"你{to}说了「{action['text']}」", IMPORTANCE_SAID, now, near_ids)
+        elif action["name"] == "move_to":
+            store.add(f"你走到了 ({action['x']}, {action['z']})", IMPORTANCE_MOVED, now)
+        path = self._memory_path(npc_id)
+        if path is not None:
+            try:
+                store.save(path)
+            except OSError as e:  # 存盘失败不应该影响游戏
+                log.warning("[%s] failed to save memory: %s", npc_id, e)
+
+    def memory_dump(self, npc_id: str) -> list[dict]:
+        return self._mem(npc_id).dump(self.clock())
 
     def _say_status(self, npc_id: str, now: float) -> str:
         """ok：可以说话；cooldown：刚说过，稍等；capped：这一阵说得够多了，该走开；
@@ -203,15 +263,7 @@ class Agent:
             raise ValueError(f"unknown tool {call.name!r}")
         return {"name": call.name, **model(**call.arguments).model_dump()}
 
-    @staticmethod
-    def _describe(action: dict) -> str:
-        if action["name"] == "move_to":
-            return f"走到了 ({action['x']}, {action['z']})"
-        if action["name"] == "say":
-            return f"说了「{action['text']}」"
-        return "休息了一会儿"
-
-    def _build_prompt(self, npc_id: str, heard: list[SpeechEvent], nearby: list[tuple[str, float]]) -> tuple[str, str]:
+    def _build_prompt(self, npc_id, heard, nearby, recalled: list[Memory], now: float) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         system = (
             f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}\n"
@@ -223,12 +275,13 @@ class Agent:
         )
         me = self.positions.get(npc_id, (0.0, 0.0))
         nearby_text = [f"{_name(o)}（距离 {d:.1f} 米）" for o, d in nearby]
-        recent = "；".join(self.history[npc_id]) or "无"
         lines = [
             f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})",
             f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",
-            f"你最近经历的事：{recent}",
         ]
+        if recalled:
+            lines.append("你想起了：")
+            lines += [f"- {format_age(now - m.time)}：{m.text}" for m in recalled]
         said = len(self.say_times[npc_id])
         if said:
             lines.append(f"你在最近 {CHAT_WINDOW:.0f} 秒内已经说了 {said} 句话（最多 {MAX_SAYS_PER_WINDOW} 句）。")

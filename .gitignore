@@ -17,3 +17,6 @@ __pycache__/
 *.sln
 *.pidb
 *.suo
+
+# NPC 记忆等运行时数据
+server/data/

@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
@@ -12,12 +14,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger("townmind")
 
 app = FastAPI(title="TownMind server")
-app.state.agent = Agent(make_client())
+_llm = make_client()  # 先创建（这一步会读取 .env），再读数据目录配置
+DATA_DIR = Path(os.getenv("TOWNMIND_DATA_DIR") or Path(__file__).resolve().parents[1] / "data")
+app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories")
 
 
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/memories/{npc_id}")
+async def memories(npc_id: str) -> list[dict]:
+    """查看某个 NPC 现在记得什么（最新的 50 条），方便调试和理解记忆系统。"""
+    return app.state.agent.memory_dump(npc_id)
 
 
 @app.get("/stats")
