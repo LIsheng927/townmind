@@ -27,4 +27,5 @@ PERSONAS: dict[str, dict] = {
         },
     },
 }
+PERSONAS["player"] = {"name": "玩家", "home": "", "persona": "", "lines": {}}  # 玩家不是 NPC，只是让提示词里显示"玩家"
 DEFAULT_PERSONA = {"name": "路人", "home": "", "persona": "你是小镇里的普通居民。"}

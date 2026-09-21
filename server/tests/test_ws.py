@@ -40,3 +40,11 @@ def test_position_message_updates_position_without_reply():
         ws.send_json({"type": "hello"})  # position 没有回复，所以下一条回复应属于 hello
         assert ws.receive_json()["type"] == "welcome"
     assert app.state.agent.positions["alice"] == (3.0, 4.0)
+
+
+def test_player_say_reaches_agent_without_reply():
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "player_say", "payload": {"text": "你好呀", "pos": [1.0, 1.0]}})
+        ws.send_json({"type": "hello"})
+        assert ws.receive_json()["type"] == "welcome"
+    assert any(e.speaker == "player" and e.text == "你好呀" for e in app.state.agent.events)

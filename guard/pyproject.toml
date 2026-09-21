@@ -1,0 +1,38 @@
+[project]
+name = "townmind-guard"
+version = "0.1.0"
+description = "通用角色扮演防御分类器：训练一个小模型判断「设定+上下文+回复」是否编造/出戏/不当，可跨项目复用（TownMind 只是其中一个训练域）"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.50",
+    "anthropic>=0.40",
+    "python-dotenv>=1.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+# 只有真正要训练时才需要这些几百 MB 到几 GB 的库：uv sync/uv run 默认不装，
+# 训练那一步用 `uv sync --group train` 或 `uv run --group train ...` 单独拉取。
+train = [
+    "torch>=2.3",
+    "transformers>=4.44",
+    "peft>=0.12",
+    "trl>=0.9",
+    "accelerate>=0.33",
+    "datasets>=2.20",
+    "scikit-learn>=1.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# uv sync 默认从 PyPI 拿 torch，PyPI 上的是纯 CPU 版；这里把 torch 单独指到 PyTorch
+# 官方的 CUDA 12.8 源，RTX 50 系列（Blackwell 架构）至少要这个版本的 CUDA 才认得出来。
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

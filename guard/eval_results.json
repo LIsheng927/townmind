@@ -1,0 +1,98 @@
+{
+  "test_indomain": {
+    "guard_model": {
+      "total": 176,
+      "correct": 172,
+      "accuracy": 0.9772727272727273,
+      "per_label": {
+        "ok": {
+          "correct": 108,
+          "total": 108
+        },
+        "fabricated": {
+          "correct": 64,
+          "total": 68
+        },
+        "out_of_character": {
+          "correct": 0,
+          "total": 0
+        },
+        "unsafe": {
+          "correct": 0,
+          "total": 0
+        }
+      }
+    },
+    "regex_baseline": {
+      "total": 176,
+      "correct": 112,
+      "accuracy": 0.6363636363636364,
+      "per_label": {
+        "ok": {
+          "correct": 108,
+          "total": 108
+        },
+        "fabricated": {
+          "correct": 4,
+          "total": 68
+        },
+        "out_of_character": {
+          "correct": 0,
+          "total": 0
+        },
+        "unsafe": {
+          "correct": 0,
+          "total": 0
+        }
+      }
+    }
+  },
+  "test_crossdomain": {
+    "guard_model": {
+      "total": 50,
+      "correct": 34,
+      "accuracy": 0.68,
+      "per_label": {
+        "ok": {
+          "correct": 11,
+          "total": 12
+        },
+        "fabricated": {
+          "correct": 8,
+          "total": 14
+        },
+        "out_of_character": {
+          "correct": 8,
+          "total": 16
+        },
+        "unsafe": {
+          "correct": 7,
+          "total": 8
+        }
+      }
+    },
+    "regex_baseline": {
+      "total": 50,
+      "correct": 13,
+      "accuracy": 0.26,
+      "per_label": {
+        "ok": {
+          "correct": 12,
+          "total": 12
+        },
+        "fabricated": {
+          "correct": 0,
+          "total": 14
+        },
+        "out_of_character": {
+          "correct": 1,
+          "total": 16
+        },
+        "unsafe": {
+          "correct": 0,
+          "total": 8
+        }
+      }
+    }
+  }
+}

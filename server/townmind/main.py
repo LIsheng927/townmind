@@ -69,6 +69,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
             elif msg.type == "position":
                 # 轻量的位置更新：不触发决策，也没有回复
                 app.state.agent.update_position(msg.npc_id or "unknown", msg.payload.get("pos"))
+            elif msg.type == "player_say":
+                # 玩家说话：先过入口检查，再变成附近 NPC 能听到的说话事件；不需要回复
+                app.state.agent.hear_player(str(msg.payload.get("text", "")), msg.payload.get("pos"))
             elif msg.type == "observation":
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)

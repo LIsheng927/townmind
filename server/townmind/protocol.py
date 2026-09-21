@@ -5,6 +5,6 @@ from pydantic import BaseModel, Field
 
 
 class Envelope(BaseModel):
-    type: Literal["hello", "welcome", "observation", "position", "action", "error"]
+    type: Literal["hello", "welcome", "observation", "position", "player_say", "action", "error"]
     npc_id: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
