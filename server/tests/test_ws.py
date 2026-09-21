@@ -15,11 +15,13 @@ def test_hello_welcome():
         assert ws.receive_json()["type"] == "welcome"
 
 
-def test_observation_returns_idle_action():
+def test_observation_returns_move_action():
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "observation", "npc_id": "alice", "payload": {"pos": [0, 0]}})
         data = ws.receive_json()
         assert data["type"] == "action" and data["npc_id"] == "alice"
+        assert data["payload"]["name"] == "move_to"
+        assert abs(data["payload"]["x"]) <= 8 and abs(data["payload"]["z"]) <= 8
 
 
 def test_bad_message_returns_error():

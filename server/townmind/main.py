@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from . import policy
 from .protocol import Envelope
 
 app = FastAPI(title="TownMind server")
@@ -28,8 +29,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
             if msg.type == "hello":
                 reply = Envelope(type="welcome", payload={"server": "townmind", "version": "0.1.0"})
             elif msg.type == "observation":
-                # 占位：第 2 步会替换成真正的 Agent 决策
-                reply = Envelope(type="action", npc_id=msg.npc_id, payload={"name": "idle"})
+                action = policy.decide(msg.npc_id or "unknown", msg.payload)
+                reply = Envelope(type="action", npc_id=msg.npc_id, payload=action)
             else:
                 reply = Envelope(type="error", payload={"detail": f"unexpected type {msg.type}"})
             await ws.send_text(reply.model_dump_json())

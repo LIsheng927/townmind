@@ -20,6 +20,8 @@ namespace TownMind.Net
 
         public event Action<Envelope> OnMessage;
 
+        public bool IsConnected => _ws != null && _ws.State == WebSocketState.Open;
+
         private ClientWebSocket _ws;
         private CancellationTokenSource _cts;
         private readonly ConcurrentQueue<Envelope> _inbox = new ConcurrentQueue<Envelope>();
@@ -41,11 +43,21 @@ namespace TownMind.Net
             }
         }
 
-        public async Task Send(Envelope msg)
+        /// <summary>发送成功返回 true；未连接或发送失败返回 false（调用方据此决定是否重试）。</summary>
+        public async Task<bool> Send(Envelope msg)
         {
-            if (_ws == null || _ws.State != WebSocketState.Open) return;
-            var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(msg));
-            await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _cts.Token);
+            if (!IsConnected) return false;
+            try
+            {
+                var bytes = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(msg));
+                await _ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, _cts.Token);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[TownClient] send failed: {e.Message}");
+                return false;
+            }
         }
 
         private async Task ReceiveLoop(CancellationToken ct)
