@@ -14,6 +14,4 @@ dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-
-[tool.setuptools.packages.find]
-include = ["townmind*"]
+pythonpath = ["."]
