@@ -1,0 +1,88 @@
+"""评测入口。用法（在 server 目录下）：
+
+  uv run python -m evals.run --llm offline --minutes 2          # 不花钱，只验证流程
+  uv run python -m evals.run --llm real --minutes 5 --seed 1    # 用 .env 里配置的真实大模型
+
+会分别用几种配置跑同一个场景，输出对比表，并把结果存到 evals/results/。
+"""
+import argparse
+import asyncio
+import json
+import random
+from datetime import datetime
+from pathlib import Path
+
+from townmind.agent import Agent
+from townmind.llm.factory import make_client
+
+from .llm_tools import MeteredLLM, OfflineLLM
+from .metrics import render_table, summarize
+from .sim import SimClock, simulate
+
+CONFIGS = {
+    "full": dict(llm=True, use_memory=True, use_lore=True),
+    "no_memory": dict(llm=True, use_memory=False, use_lore=True),
+    "no_lore": dict(llm=True, use_memory=True, use_lore=False),
+    "no_llm": dict(llm=False, use_memory=True, use_lore=True),  # 完全不用大模型：纯规则基线
+}
+RESULTS_DIR = Path(__file__).parent / "results"
+
+
+async def run_config(name: str, llm_kind: str, seconds: float, seed: int) -> dict:
+    opts = CONFIGS[name]
+    random.seed(seed)  # 兜底策略用的是全局随机数，也要固定
+    clock = SimClock()
+    metered = None
+    if opts["llm"]:
+        inner = OfflineLLM() if llm_kind == "offline" else make_client()
+        if inner is None:
+            raise SystemExit("没有可用的大模型：请检查 server/.env 里 provider 和对应的 key 是否匹配。")
+        metered = MeteredLLM(inner)
+    agent = Agent(
+        metered,
+        clock=clock,
+        rng=random.Random(seed),
+        use_memory=opts["use_memory"],
+        use_lore=opts["use_lore"],
+    )
+    agent.trace = []
+    await simulate(agent, clock, seconds)
+    return summarize(agent.trace, dict(agent.stats), metered.latencies if metered else [], seconds)
+
+
+async def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--llm", choices=["offline", "real"], default="offline")
+    ap.add_argument("--minutes", type=float, default=2.0, help="每个配置模拟多少分钟的小镇时间")
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--configs", default="full,no_memory,no_lore,no_llm")
+    args = ap.parse_args()
+
+    names = [c.strip() for c in args.configs.split(",") if c.strip()]
+    unknown = [n for n in names if n not in CONFIGS]
+    if unknown:
+        raise SystemExit(f"未知配置：{unknown}；可选：{list(CONFIGS)}")
+
+    seconds = args.minutes * 60
+    results = {}
+    for n in names:
+        print(f"[eval] 运行配置 {n} ...", flush=True)
+        results[n] = await run_config(n, args.llm, seconds, args.seed)
+
+    table = render_table(results)
+    header = f"llm={args.llm}  模拟时长={args.minutes} 分钟  seed={args.seed}"
+    if args.llm == "offline":
+        header += "\n注意：offline 是假大模型，只验证流程，指标数字没有参考意义。"
+    print("\n" + header + "\n\n" + table)
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    (RESULTS_DIR / f"{stamp}.json").write_text(
+        json.dumps({"args": vars(args), "results": results}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (RESULTS_DIR / f"{stamp}.md").write_text(header + "\n\n" + table + "\n", encoding="utf-8")
+    print(f"\n结果已保存到 evals/results/{stamp}.(json|md)")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

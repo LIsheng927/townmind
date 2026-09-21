@@ -96,9 +96,14 @@ class Agent:
         clock: Callable[[], float] = time.time,  # 用真实时间：记忆要能跨重启，monotonic 重启后会归零
         memory_dir: Path | None = None,
         rng: random.Random | None = None,
+        use_memory: bool = True,  # 评测时可关闭，做消融对比
+        use_lore: bool = True,
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
+        self.use_memory = use_memory
+        self.use_lore = use_lore
+        self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
@@ -125,7 +130,7 @@ class Agent:
         status = self._say_status(npc_id, now)
         # 回忆：只取和眼前的人最相关、最重要、最新的几条。要在写入本轮新记忆之前取，避免"想起"刚发生的事
         involved = {o for o, _ in nearby} | {e.speaker for e in heard}
-        recalled = self._mem(npc_id).recall(involved, now)
+        recalled = self._mem(npc_id).recall(involved, now) if self.use_memory else []
 
         action, source = None, "fallback"
         if self.llm is not None:
@@ -161,7 +166,12 @@ class Agent:
         if action["name"] == "say":
             self._record_speech(npc_id, action["text"], now)
 
-        self._remember(npc_id, now, heard, nearby, action, ended)
+        if self.use_memory:
+            self._remember(npc_id, now, heard, nearby, action, ended)
+        if self.trace is not None:
+            self.trace.append(
+                {"t": now, "npc": npc_id, "source": source, "action": dict(action), "nearby": [o for o, _ in nearby]}
+            )
         log.info("[%s] %s -> %s%s", npc_id, source, action, "  (end_conversation)" if ended else "")
         return action
 
@@ -170,6 +180,8 @@ class Agent:
         self.stats["llm_calls"] += 1
         try:
             call = await asyncio.wait_for(self.llm.choose_tool(system, user, TOOLS), self.timeout)
+            self.stats["tokens_in"] += call.input_tokens  # 先记账再校验：校验失败的调用也是花了钱的
+            self.stats["tokens_out"] += call.output_tokens
             return self._validate(call), "llm"
         except Exception as e:  # 超时/网络/参数非法都走兜底
             self.stats["llm_failures"] += 1
@@ -283,19 +295,25 @@ class Agent:
 
     def _build_prompt(self, npc_id, heard, nearby, recalled: list[Memory], now: float) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
-        system = (
-            f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}\n"
-            + (f"你的工作地点是{p['home']}。\n" if p.get("home") else "")
-            + f"小镇里有这些地点：{'、'.join(PLACE_NAMES)}。想去某处时用 go_to。\n"
-            "每次你必须调用一个工具来决定下一步行动。\n"
-            "你只能聊小镇里真实存在的事，也就是下面\"你现在在\"和\"镇上的事\"里写到的内容，不要编造不存在的地点、活动或人物。\n"
-            f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。\n"
-            "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。\n"
-            "话题聊完了、或者已经聊了三四句，就用 end_conversation 道别并走开去忙自己的事，不要一直聊下去。"
-        )
+        parts = [
+            f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}",
+            f"你的工作地点是{p['home']}。" if p.get("home") else "",
+            f"小镇里有这些地点：{'、'.join(PLACE_NAMES)}。想去某处时用 go_to。",
+            "每次你必须调用一个工具来决定下一步行动。",
+            "你只能聊小镇里真实存在的事，也就是下面\"你现在在\"和\"镇上的事\"里写到的内容，不要编造不存在的地点、活动或人物。"
+            if self.use_lore
+            else "",
+            f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。",
+            "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。",
+            "话题聊完了、或者已经聊了三四句，就用 end_conversation 道别并走开去忙自己的事，不要一直聊下去。",
+        ]
+        system = "\n".join(x for x in parts if x)
         me = self.positions.get(npc_id, (0.0, 0.0))
         nearby_text = [f"{_name(o)}（距离 {d:.1f} 米）" for o, d in nearby]
-        lines = world.describe_surroundings(me) + [
+        surroundings = (
+            world.describe_surroundings(me) if self.use_lore else [f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})"]
+        )
+        lines = surroundings + [
             f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",
         ]
         if recalled:

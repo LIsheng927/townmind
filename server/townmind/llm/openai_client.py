@@ -29,4 +29,10 @@ class OpenAIClient:
         calls = resp.choices[0].message.tool_calls
         if not calls:
             raise LLMError("model returned no tool call")
-        return ToolCall(calls[0].function.name, json.loads(calls[0].function.arguments))
+        usage = resp.usage
+        return ToolCall(
+            calls[0].function.name,
+            json.loads(calls[0].function.arguments),
+            input_tokens=usage.prompt_tokens if usage else 0,
+            output_tokens=usage.completion_tokens if usage else 0,
+        )

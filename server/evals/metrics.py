@@ -1,0 +1,133 @@
+"""评测指标：全部是对"决策轨迹"的纯计算，不依赖大模型，可以单独测试。
+
+指标都是启发式的（用关键词、正则、字符相似度），够用来做 A/B 对比，
+但不等于人工评审；报告里应当把这点写清楚。
+"""
+import re
+
+from townmind import world
+
+# ---- 词表 ----
+# 引用了设定里的真实内容 -> 算"有依据"
+GROUNDING_KEYWORDS = (
+    "面粉", "涨价", "法棍", "肉桂卷", "蓝莓松饼", "铁矿", "矿石", "集市", "古井", "长椅", "摆摊",
+    "打铁", "面包店", "铁匠铺", "广场", "刚到小镇", "刚到这个小镇",
+)  # fmt: skip
+# 提到"××店/××节/××馆"这类地点或活动，但设定里没有 -> 算"编造"
+PLACE_OR_EVENT = re.compile(r"[一-鿿]{1,3}(?:店|铺|馆|院|坊|楼|节|市场|集市|酒馆|学校|医馆)")
+ALLOWED_TERMS = {loc.name for loc in world.LOCATIONS} | {"集市"}
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    v = sorted(values)
+    k = (len(v) - 1) * p / 100
+    lo, hi = int(k), min(int(k) + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+def _bigrams(text: str) -> set[str]:
+    t = re.sub(r"[\W_]+", "", text)
+    return {t[i : i + 2] for i in range(len(t) - 1)} or {t}
+
+
+def similarity(a: str, b: str) -> float:
+    """字符二元组的 Jaccard 相似度：两句话越像越接近 1。"""
+    A, B = _bigrams(a), _bigrams(b)
+    return len(A & B) / len(A | B) if (A | B) else 0.0
+
+
+def invented_mentions(text: str) -> list[str]:
+    return [m for m in PLACE_OR_EVENT.findall(text) if not any(t in m for t in ALLOWED_TERMS)]
+
+
+def _rate(hits: int, total: int) -> float:
+    return hits / total if total else 0.0
+
+
+def repetition_rate(say_events: list[dict], threshold: float = 0.6) -> float:
+    """同一个 NPC 的话，和它自己以前说过的某句太像（相似度 >= 阈值）的比例。"""
+    seen: dict[str, list[str]] = {}
+    repeated = 0
+    for e in say_events:
+        text = e["action"]["text"]
+        prev = seen.setdefault(e["npc"], [])
+        if any(similarity(text, p) >= threshold for p in prev):
+            repeated += 1
+        prev.append(text)
+    return _rate(repeated, len(say_events))
+
+
+def invented_rate(say_events: list[dict]) -> float:
+    return _rate(sum(bool(invented_mentions(e["action"]["text"])) for e in say_events), len(say_events))
+
+
+def grounded_rate(say_events: list[dict]) -> float:
+    return _rate(
+        sum(any(k in e["action"]["text"] for k in GROUNDING_KEYWORDS) for e in say_events), len(say_events)
+    )
+
+
+def response_rate(say_events: list[dict], window: float = 15.0) -> float:
+    """有人在旁边时说的话，旁边的人有没有在 window 秒内回话。"""
+    total = answered = 0
+    for i, e in enumerate(say_events):
+        if not e["nearby"]:
+            continue
+        total += 1
+        if any(
+            o["npc"] != e["npc"] and o["npc"] in e["nearby"] and 0 < o["t"] - e["t"] <= window
+            for o in say_events[i + 1 :]
+        ):
+            answered += 1
+    return _rate(answered, total)
+
+
+def summarize(trace: list[dict], stats: dict, latencies: list[float], seconds: float) -> dict:
+    says = [e for e in trace if e["action"]["name"] == "say"]
+    calls = stats.get("llm_calls", 0)
+    return {
+        "decisions": len(trace),
+        "llm_calls": calls,
+        "llm_calls_per_min": calls / (seconds / 60) if seconds else 0.0,
+        "llm_failure_rate": _rate(stats.get("llm_failures", 0), calls),
+        "tokens_in": stats.get("tokens_in", 0),
+        "tokens_out": stats.get("tokens_out", 0),
+        "latency_p50_ms": percentile(latencies, 50) * 1000,
+        "latency_p95_ms": percentile(latencies, 95) * 1000,
+        "say_count": len(says),
+        "ended_conversations": stats.get("ended_conversations", 0),
+        "repetition_rate": repetition_rate(says),
+        "invented_rate": invented_rate(says),
+        "grounded_rate": grounded_rate(says),
+        "response_rate": response_rate(says),
+    }
+
+
+METRICS = [
+    ("decisions", "总决策次数", "{:d}"),
+    ("llm_calls", "大模型调用次数", "{:d}"),
+    ("llm_calls_per_min", "每分钟调用次数", "{:.1f}"),
+    ("llm_failure_rate", "调用失败率", "{:.1%}"),
+    ("tokens_in", "输入 Token", "{:d}"),
+    ("tokens_out", "输出 Token", "{:d}"),
+    ("latency_p50_ms", "延迟 P50 (ms)", "{:.0f}"),
+    ("latency_p95_ms", "延迟 P95 (ms)", "{:.0f}"),
+    ("say_count", "说话次数", "{:d}"),
+    ("ended_conversations", "主动结束对话次数", "{:d}"),
+    ("repetition_rate", "重复率（越低越好）", "{:.1%}"),
+    ("invented_rate", "编造地点/活动率（越低越好）", "{:.1%}"),
+    ("grounded_rate", "引用真实设定率（越高越好）", "{:.1%}"),
+    ("response_rate", "被回应率（越高越好）", "{:.1%}"),
+]
+
+
+def render_table(results: dict[str, dict]) -> str:
+    """把多组配置的结果渲染成 Markdown 表格。"""
+    names = list(results)
+    lines = ["| 指标 | " + " | ".join(names) + " |", "|---|" + "---|" * len(names)]
+    for key, label, fmt in METRICS:
+        cells = [fmt.format(results[n][key]) for n in names]
+        lines.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(lines)

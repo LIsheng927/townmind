@@ -11,6 +11,8 @@ class LLMError(Exception):
 class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    input_tokens: int = 0  # 这次调用消耗的输入/输出 Token，用于成本评测
+    output_tokens: int = 0
 
 
 class LLMClient(Protocol):

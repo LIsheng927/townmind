@@ -24,5 +24,10 @@ class AnthropicClient:
         )
         for block in resp.content:
             if block.type == "tool_use":
-                return ToolCall(block.name, dict(block.input))
+                return ToolCall(
+                    block.name,
+                    dict(block.input),
+                    input_tokens=resp.usage.input_tokens,
+                    output_tokens=resp.usage.output_tokens,
+                )
         raise LLMError("model returned no tool call")

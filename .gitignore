@@ -20,3 +20,4 @@ __pycache__/
 
 # NPC 记忆等运行时数据
 server/data/
+server/evals/results/
