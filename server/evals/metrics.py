@@ -84,6 +84,48 @@ def response_rate(say_events: list[dict], window: float = 15.0) -> float:
     return _rate(answered, total)
 
 
+def annotate_says(trace: list[dict], t0: float = 0.0) -> list[dict]:
+    """逐句标注：每句 NPC 说的话，分别是否被判为 编造 / 有依据 / 重复。
+    指标是启发式的，会有误判；保存逐句结果，就能回头人工检查每一个被标记的句子。"""
+    seen: dict[str, list[str]] = {}
+    out = []
+    for e in trace:
+        if e["action"]["name"] != "say":
+            continue
+        text = e["action"]["text"]
+        prev = seen.setdefault(e["npc"], [])
+        out.append(
+            {
+                "t": round(e["t"] - t0, 1),
+                "npc": e["npc"],
+                "text": text,
+                "invented": invented_mentions(text),
+                "grounded": any(k in text for k in GROUNDING_KEYWORDS),
+                "repeated": any(similarity(text, p) >= 0.6 for p in prev),
+            }
+        )
+        prev.append(text)
+    return out
+
+
+def render_flagged(says_by_run: dict[str, dict[str, list[dict]]]) -> str:
+    """把被判为"编造"或"重复"的句子列出来，方便人工核对指标有没有误判。"""
+    lines = ["# 被标记的句子（请人工核对是否误判）", ""]
+    for config, by_seed in says_by_run.items():
+        for seed, says in by_seed.items():
+            flagged = [s for s in says if s["invented"] or s["repeated"]]
+            lines.append(f"## {config} / seed={seed}：共 {len(says)} 句，被标记 {len(flagged)} 句")
+            for s in flagged:
+                tags = []
+                if s["invented"]:
+                    tags.append("疑似编造：" + "、".join(s["invented"]))
+                if s["repeated"]:
+                    tags.append("重复")
+                lines.append(f"- [{s['t']}s] {s['npc']}：「{s['text']}」  ← {'；'.join(tags)}")
+            lines.append("")
+    return "\n".join(lines)
+
+
 def summarize(trace: list[dict], stats: dict, latencies: list[float], seconds: float) -> dict:
     says = [e for e in trace if e["action"]["name"] == "say"]
     calls = stats.get("llm_calls", 0)

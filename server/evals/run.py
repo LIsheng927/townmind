@@ -16,7 +16,7 @@ from townmind.agent import Agent
 from townmind.llm.factory import make_client
 
 from .llm_tools import MeteredLLM, OfflineLLM
-from .metrics import aggregate, render_table, summarize
+from .metrics import aggregate, annotate_says, render_flagged, render_table, summarize
 from .sim import SimClock, simulate
 
 CONFIGS = {
@@ -28,7 +28,7 @@ CONFIGS = {
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
-async def run_config(name: str, llm_kind: str, seconds: float, seed: int) -> dict:
+async def run_config(name: str, llm_kind: str, seconds: float, seed: int) -> tuple[dict, list[dict]]:
     opts = CONFIGS[name]
     random.seed(seed)  # 兜底策略用的是全局随机数，也要固定
     clock = SimClock()
@@ -46,8 +46,10 @@ async def run_config(name: str, llm_kind: str, seconds: float, seed: int) -> dic
         use_lore=opts["use_lore"],
     )
     agent.trace = []
+    t0 = clock.t
     await simulate(agent, clock, seconds)
-    return summarize(agent.trace, dict(agent.stats), metered.latencies if metered else [], seconds)
+    summary = summarize(agent.trace, dict(agent.stats), metered.latencies if metered else [], seconds)
+    return summary, annotate_says(agent.trace, t0)
 
 
 async def main() -> None:
@@ -66,11 +68,14 @@ async def main() -> None:
     seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
     seconds = args.minutes * 60
     raw: dict[str, list[dict]] = {}
+    says_all: dict[str, dict[str, list[dict]]] = {}
     for n in names:
-        raw[n] = []
+        raw[n], says_all[n] = [], {}
         for seed in seeds:
             print(f"[eval] 配置 {n}  seed={seed} ...", flush=True)
-            raw[n].append(await run_config(n, args.llm, seconds, seed))
+            summary, says = await run_config(n, args.llm, seconds, seed)
+            raw[n].append(summary)
+            says_all[n][str(seed)] = says
     results = {n: aggregate(runs) for n, runs in raw.items()}
 
     table = render_table(results)
@@ -84,11 +89,14 @@ async def main() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     (RESULTS_DIR / f"{stamp}.json").write_text(
-        json.dumps({"args": vars(args), "aggregate": results, "runs": raw}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {"args": vars(args), "aggregate": results, "runs": raw, "says": says_all}, ensure_ascii=False, indent=2
+        ),
         encoding="utf-8",
     )
     (RESULTS_DIR / f"{stamp}.md").write_text(header + "\n\n" + table + "\n", encoding="utf-8")
-    print(f"\n结果已保存到 evals/results/{stamp}.(json|md)")
+    (RESULTS_DIR / f"{stamp}-flagged.md").write_text(render_flagged(says_all), encoding="utf-8")
+    print(f"\n结果已保存到 evals/results/{stamp}.(json|md)；被标记的句子见 {stamp}-flagged.md")
 
 
 if __name__ == "__main__":

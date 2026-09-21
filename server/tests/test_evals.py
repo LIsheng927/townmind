@@ -157,3 +157,27 @@ def test_token_usage_is_accumulated():
     agent = run_sim(seconds=10, llm=Fake())
     calls = agent.stats["llm_calls"]
     assert calls > 0 and agent.stats["tokens_in"] == 100 * calls and agent.stats["tokens_out"] == 7 * calls
+
+
+# ---------- 逐句标注 ----------
+def test_annotate_says_flags_each_line():
+    trace = [
+        {"t": 1010.0, "npc": "alice", "action": {"name": "say", "text": "小镇的面包节快到了"}, "nearby": []},
+        {"t": 1015.0, "npc": "alice", "action": {"name": "idle", "seconds": 3}, "nearby": []},
+        {"t": 1020.0, "npc": "alice", "action": {"name": "say", "text": "小镇的面包节快到了"}, "nearby": []},
+        {"t": 1030.0, "npc": "bob", "action": {"name": "say", "text": "面粉涨价了"}, "nearby": []},
+    ]
+    a = metrics.annotate_says(trace, t0=1000.0)
+    assert [x["t"] for x in a] == [10.0, 20.0, 30.0]  # 只含说话，时间相对起点
+    assert a[0]["invented"] and not a[0]["repeated"]
+    assert a[1]["repeated"]  # 第二次说同一句
+    assert a[2]["grounded"] and not a[2]["invented"]
+
+
+def test_render_flagged_lists_only_flagged_lines():
+    says = {"full": {"1": [
+        {"t": 1.0, "npc": "alice", "text": "面包节快到了", "invented": ["面包节"], "grounded": False, "repeated": False},
+        {"t": 2.0, "npc": "alice", "text": "你好", "invented": [], "grounded": False, "repeated": False},
+    ]}}
+    md = metrics.render_flagged(says)
+    assert "共 2 句，被标记 1 句" in md and "面包节快到了" in md and "「你好」" not in md
