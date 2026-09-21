@@ -14,7 +14,9 @@ def test_health():
 def test_hello_welcome():
     with client.websocket_connect("/ws") as ws:
         ws.send_json({"type": "hello"})
-        assert ws.receive_json()["type"] == "welcome"
+        msg = ws.receive_json()
+        assert msg["type"] == "welcome"
+        assert {l["name"] for l in msg["payload"]["locations"]} == {"面包店", "铁匠铺", "广场"}
 
 
 def test_observation_returns_move_action():

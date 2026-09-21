@@ -24,9 +24,11 @@ def decide(agent, npc="alice", obs=None):
     return asyncio.run(agent.decide(npc, obs or {"pos": [0, 0]}))
 
 
-def test_valid_move_is_used():
-    a = Agent(FakeLLM(ToolCall("move_to", {"x": 3, "z": -2})))
-    assert decide(a) == {"name": "move_to", "x": 3.0, "z": -2.0}
+def test_go_to_is_translated_to_coordinates_near_the_place():
+    a = Agent(FakeLLM(ToolCall("go_to", {"place": "面包店"})))
+    r = decide(a)
+    assert r["name"] == "move_to" and r["place"] == "面包店"
+    assert abs(r["x"] - (-5.0)) <= 1.0 and abs(r["z"] - 2.0) <= 0.4  # 站在面包店门前
 
 
 def test_valid_say_is_used():
@@ -34,10 +36,10 @@ def test_valid_say_is_used():
     assert decide(a) == {"name": "say", "text": "你好呀"}
 
 
-def test_out_of_range_args_fall_back():
-    a = Agent(FakeLLM(ToolCall("move_to", {"x": 999, "z": 0})))
+def test_nonexistent_place_falls_back():
+    a = Agent(FakeLLM(ToolCall("go_to", {"place": "月球"})))  # 大模型编了一个不存在的地点
     r = decide(a)
-    assert r["name"] == "move_to" and abs(r["x"]) <= 8
+    assert r["name"] == "move_to" and abs(r["x"]) <= 8 and "place" not in r  # 兜底的随机游走
 
 
 def test_unknown_tool_falls_back():
@@ -253,6 +255,51 @@ def test_idle_is_not_worth_remembering():
 
 
 def test_walking_is_not_worth_remembering():
-    a = Agent(FakeLLM(ToolCall("move_to", {"x": 1, "z": 2})))
+    a = Agent(FakeLLM(ToolCall("go_to", {"place": "广场"})))
     decide(a)
-    assert not any("走到" in t for t in texts(a))
+    assert not any("走到" in t or "广场" in t for t in texts(a))
+
+
+# ---------- 世界设定 ----------
+def test_prompt_contains_world_lore_at_current_location():
+    llm = ScriptedLLM([ToolCall("idle", {})])
+    a = Agent(llm)
+    a.positions["bob"] = (-4.0, 2.0)  # 让 bob 在 alice 旁边，才会触发大模型
+    decide(a, "alice", {"pos": [-5, 2]})  # alice 站在面包店门前
+    assert "你现在在：面包店" in llm.users[0]
+    assert "面粉涨价" in llm.users[0]  # 面包店的事实
+    assert "铁矿" not in llm.users[0]  # 别处的事实不该出现
+
+
+def test_prompt_tells_persona_workplace_and_place_list():
+    seen = {}
+
+    class Spy(FakeLLM):
+        async def choose_tool(self, system, user, tools):
+            seen["system"] = system
+            seen["tools"] = [t["name"] for t in tools]
+            return ToolCall("idle", {})
+
+    a = Agent(Spy())
+    decide(a, "alice", {"pos": [0, 0]})
+    assert "你的工作地点是面包店" in seen["system"]
+    assert "面包店、铁匠铺、广场" in seen["system"]
+    assert "go_to" in seen["tools"] and "move_to" not in seen["tools"]  # 大模型不再直接给坐标
+
+
+def test_wander_goes_to_real_places_or_idles():
+    import random
+
+    a = Agent(None, rng=random.Random(42))
+    names = {"面包店", "铁匠铺", "广场"}
+    for _ in range(50):
+        r = a._wander("alice")
+        assert r["name"] == "idle" or (r["name"] == "move_to" and r["place"] in names)
+
+
+def test_wander_favors_own_workplace():
+    import random
+
+    a = Agent(None, rng=random.Random(7))
+    places = [r["place"] for r in (a._wander("bob") for _ in range(400)) if r["name"] == "move_to"]
+    assert places.count("铁匠铺") > places.count("面包店")

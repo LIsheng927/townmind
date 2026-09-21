@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
+from . import world
 from .agent import Agent
 from .llm.factory import make_client
 from .protocol import Envelope
@@ -64,7 +65,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 continue
 
             if msg.type == "hello":
-                await send(Envelope(type="welcome", payload={"server": "townmind", "version": "0.2.0"}))
+                await send(Envelope(type="welcome", payload={"server": "townmind", "version": "0.3.0", "locations": world.locations_payload()}))
             elif msg.type == "observation":
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)

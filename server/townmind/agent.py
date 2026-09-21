@@ -7,16 +7,17 @@ NPC 之间的对话：某个 NPC 说话时，服务端把这句话记成一条"�
 import asyncio
 import logging
 import math
+import random
 import re
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from . import policy
+from . import policy, world
 from .llm.base import LLMClient, ToolCall
 from .memory import Memory, MemoryStore, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
@@ -37,9 +38,11 @@ IMPORTANCE_SAID = 4  # 我自己说的话
 MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
 
 
-class MoveTo(BaseModel):
-    x: float = Field(ge=-HALF, le=HALF, description="目标 x 坐标")
-    z: float = Field(ge=-HALF, le=HALF, description="目标 z 坐标")
+PLACE_NAMES = tuple(loc.name for loc in world.LOCATIONS)
+
+
+class GoTo(BaseModel):
+    place: Literal[PLACE_NAMES] = Field(description="要前往的地点名称")  # 只能是小镇里真实存在的地点
 
 
 class Say(BaseModel):
@@ -55,13 +58,13 @@ class EndConversation(BaseModel):
 
 
 ARG_MODELS: dict[str, type[BaseModel]] = {
-    "move_to": MoveTo,
+    "go_to": GoTo,
     "say": Say,
     "idle": Idle,
     "end_conversation": EndConversation,
 }
 TOOL_DESCRIPTIONS = {
-    "move_to": "走到小镇里的某个位置",
+    "go_to": f"前往小镇里的一个地点，可选：{'、'.join(PLACE_NAMES)}",
     "say": "说一句话（头顶会显示对话气泡，附近的人能听到）",
     "idle": "原地休息一会儿",
     "end_conversation": "结束当前的对话：说一句道别的话，然后走开去忙自己的事",
@@ -92,8 +95,10 @@ class Agent:
         timeout: float = 8.0,
         clock: Callable[[], float] = time.time,  # 用真实时间：记忆要能跨重启，monotonic 重启后会归零
         memory_dir: Path | None = None,
+        rng: random.Random | None = None,
     ) -> None:
         self.llm = llm
+        self.rng = rng or random.Random()
         self.timeout = timeout
         self.clock = clock  # 可注入，测试时用假时钟
         self.positions: dict[str, tuple[float, float]] = {}
@@ -133,10 +138,16 @@ class Agent:
                 action, source = {"name": "idle", "seconds": round(max(1.0, min(wait, 10.0)), 1)}, "rule"
             else:
                 # 没事发生，或者这场对话已经聊够了：走走停停，不调用大模型
-                action, source = policy.wander(), "rule"
+                action, source = self._wander(npc_id), "rule"
 
         if action is None:
             action, source = policy.decide(npc_id, observation), "fallback"
+
+        if action["name"] == "go_to":
+            # 大模型只选"去哪个地点"；坐标由服务端根据世界设定算出来。Unity 仍然只认 move_to。
+            loc = world.get_location(action["place"])
+            x, z = loc.stand_point(self.rng)
+            action = {"name": "move_to", "x": x, "z": z, "place": loc.name}
 
         ended = action["name"] == "end_conversation"
         if ended:
@@ -164,6 +175,15 @@ class Agent:
             self.stats["llm_failures"] += 1
             log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
             return None, "fallback"
+
+    def _wander(self, npc_id: str) -> dict:
+        """没事发生时的日常：一部分时间发呆，其余时间在小镇的真实地点之间走动，偏爱自己的工作地点。零成本。"""
+        if self.rng.random() < 0.35:
+            return {"name": "idle", "seconds": round(self.rng.uniform(2, 5), 1)}
+        home = world.get_location(PERSONAS.get(npc_id, DEFAULT_PERSONA).get("home", ""))
+        loc = home if (home and self.rng.random() < 0.5) else self.rng.choice(world.LOCATIONS)
+        x, z = loc.stand_point(self.rng)
+        return {"name": "move_to", "x": x, "z": z, "place": loc.name}
 
     # ---------- 记忆 ----------
     def _memory_path(self, npc_id: str) -> Path | None:
@@ -265,16 +285,17 @@ class Agent:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         system = (
             f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}\n"
-            f"小镇是一块平地，坐标 x、z 的范围都是 -{HALF} 到 {HALF}。\n"
+            + (f"你的工作地点是{p['home']}。\n" if p.get("home") else "")
+            + f"小镇里有这些地点：{'、'.join(PLACE_NAMES)}。想去某处时用 go_to。\n"
             "每次你必须调用一个工具来决定下一步行动。\n"
+            "你只能聊小镇里真实存在的事，也就是下面\"你现在在\"和\"镇上的事\"里写到的内容，不要编造不存在的地点、活动或人物。\n"
             f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。\n"
             "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。\n"
             "话题聊完了、或者已经聊了三四句，就用 end_conversation 道别并走开去忙自己的事，不要一直聊下去。"
         )
         me = self.positions.get(npc_id, (0.0, 0.0))
         nearby_text = [f"{_name(o)}（距离 {d:.1f} 米）" for o, d in nearby]
-        lines = [
-            f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})",
+        lines = world.describe_surroundings(me) + [
             f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",
         ]
         if recalled:

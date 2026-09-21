@@ -1,27 +1,34 @@
+using Newtonsoft.Json.Linq;
 using TownMind.Net;
 using UnityEngine;
 
 namespace TownMind.World
 {
     /// <summary>
-    /// 用代码搭建最小小镇：地面 + 3 个方块 NPC + 俯视相机。
+    /// 用代码搭建小镇：地面 + 3 个方块 NPC + 俯视相机；
+    /// 建筑（面包店、铁匠铺、广场）由服务端在 welcome 消息里下发，收到后再盖。
+    /// 这样"小镇有哪些地点"只在服务端的 world.py 里维护一份，不会两边不一致。
     /// 挂在和 TownClient 相同的物体上。
     /// </summary>
     [RequireComponent(typeof(TownClient))]
     public class TownWorld : MonoBehaviour
     {
+        private TownClient _client;
+        private bool _built;
+
         private void Start()
         {
-            var client = GetComponent<TownClient>();
+            _client = GetComponent<TownClient>();
+            _client.OnMessage += OnMessage;
 
             var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
             ground.name = "Ground";
             ground.transform.localScale = new Vector3(2f, 1f, 2f); // Plane 默认 10x10，这里变成 20x20
             ground.GetComponent<Renderer>().material.color = new Color(0.35f, 0.5f, 0.3f);
 
-            Spawn(client, "alice", new Vector3(-3, 0.5f, 0), Color.red);
-            Spawn(client, "bob", new Vector3(0, 0.5f, 3), Color.blue);
-            Spawn(client, "carol", new Vector3(3, 0.5f, -2), Color.yellow);
+            Spawn("alice", new Vector3(-3, 0.5f, 0), Color.red);
+            Spawn("bob", new Vector3(0, 0.5f, 3), Color.blue);
+            Spawn("carol", new Vector3(3, 0.5f, -2), Color.yellow);
 
             var cam = Camera.main;
             if (cam != null)
@@ -31,13 +38,60 @@ namespace TownMind.World
             }
         }
 
-        private static void Spawn(TownClient client, string id, Vector3 pos, Color color)
+        private void OnDestroy()
+        {
+            if (_client != null) _client.OnMessage -= OnMessage;
+        }
+
+        private void Spawn(string id, Vector3 pos, Color color)
         {
             var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
             go.name = id;
             go.transform.position = pos;
             go.GetComponent<Renderer>().material.color = color;
-            go.AddComponent<NpcController>().Init(id, client);
+            go.AddComponent<NpcController>().Init(id, _client);
+        }
+
+        private void OnMessage(Envelope msg)
+        {
+            if (msg.Type != "welcome" || _built) return;
+            if (!msg.Payload.TryGetValue("locations", out var raw) || !(raw is JArray locations)) return;
+            _built = true;
+            foreach (var item in locations) BuildLocation((JObject)item);
+        }
+
+        private static void BuildLocation(JObject o)
+        {
+            var name = (string)o["name"];
+            var x = (float)o["x"];
+            var z = (float)o["z"];
+            var kind = (string)o["kind"];
+
+            GameObject go;
+            float labelHeight;
+            if (kind == "plaza")
+            {
+                go = GameObject.CreatePrimitive(PrimitiveType.Cylinder); // 一块扁平的圆形广场
+                go.transform.position = new Vector3(x, 0.05f, z);
+                go.transform.localScale = new Vector3(7f, 0.05f, 7f);
+                go.GetComponent<Renderer>().material.color = new Color(0.75f, 0.75f, 0.7f);
+                labelHeight = 0.3f;
+            }
+            else
+            {
+                go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                go.transform.position = new Vector3(x, 0.75f, z);
+                go.transform.localScale = new Vector3(2.5f, 1.5f, 2.5f);
+                go.GetComponent<Renderer>().material.color = kind == "bakery"
+                    ? new Color(0.9f, 0.6f, 0.25f)
+                    : new Color(0.3f, 0.3f, 0.35f);
+                labelHeight = 1.6f;
+            }
+            go.name = name;
+
+            // 名牌不挂在建筑下面（建筑被缩放过，子物体会跟着变形），直接放在世界坐标里
+            var label = TextLabel.Make(null, name, new Vector3(x, labelHeight, z), 0.15f, Color.white);
+            if (Camera.main != null) label.transform.rotation = Camera.main.transform.rotation;
         }
     }
 }

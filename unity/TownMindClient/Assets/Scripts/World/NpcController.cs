@@ -64,20 +64,7 @@ namespace TownMind.World
         private void ShowSpeech(string text)
         {
             if (_speech != null) Destroy(_speech.gameObject);
-            var go = new GameObject("Speech");
-            go.transform.SetParent(transform, false);
-            go.transform.localPosition = new Vector3(0, 1.2f, 0);
-            _speech = go.AddComponent<TextMesh>();
-            _speech.text = text;
-            _speech.characterSize = 0.12f;
-            _speech.fontSize = 48;
-            _speech.anchor = TextAnchor.LowerCenter;
-            _speech.alignment = TextAlignment.Center;
-            _speech.color = Color.white;
-            // Unity 内置字体不含中文，改用系统字体（Windows 上是微软雅黑）
-            var font = Font.CreateDynamicFontFromOSFont(new[] { "Microsoft YaHei", "SimHei", "Arial" }, 48);
-            _speech.font = font;
-            go.GetComponent<MeshRenderer>().material = font.material;
+            _speech = TextLabel.Make(transform, text, new Vector3(0, 1.2f, 0), 0.12f, Color.white);
             _speechExpire = Time.time + 4f;
         }
 
