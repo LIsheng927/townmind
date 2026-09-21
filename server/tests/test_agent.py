@@ -303,3 +303,14 @@ def test_wander_favors_own_workplace():
     a = Agent(None, rng=random.Random(7))
     places = [r["place"] for r in (a._wander("bob") for _ in range(400)) if r["name"] == "move_to"]
     assert places.count("铁匠铺") > places.count("面包店")
+
+
+def test_update_position_changes_who_is_nearby():
+    a = Agent(None, clock=lambda: 1000.0)
+    a.update_position("alice", [0.0, 0.0])
+    a.update_position("bob", [20.0, 0.0])
+    assert a._nearby("alice") == []
+    a.update_position("bob", [2.0, 0.0])  # 走近了
+    assert [n for n, _ in a._nearby("alice")] == ["bob"]
+    a.update_position("bob", "garbage")  # 非法数据被忽略，不崩
+    assert a.positions["bob"] == (2.0, 0.0)

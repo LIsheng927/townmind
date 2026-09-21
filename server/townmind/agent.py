@@ -118,10 +118,13 @@ class Agent:
         # 决策统计：用来观察成本，也是后面评测框架的基础
         self.stats: dict[str, int] = defaultdict(int)
 
-    async def decide(self, npc_id: str, observation: dict) -> dict:
-        pos = observation.get("pos")
+    def update_position(self, npc_id: str, pos) -> None:
+        """记录 NPC 的最新位置。Unity 走路时会定期上报，所以"谁在附近"不会用过期位置来判断。"""
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
             self.positions[npc_id] = (float(pos[0]), float(pos[1]))
+
+    async def decide(self, npc_id: str, observation: dict) -> dict:
+        self.update_position(npc_id, observation.get("pos"))
 
         now = self.clock()
         heard = self._collect_heard(npc_id, now)  # 先取走"听到的话"

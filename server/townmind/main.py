@@ -66,6 +66,9 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
             if msg.type == "hello":
                 await send(Envelope(type="welcome", payload={"server": "townmind", "version": "0.3.0", "locations": world.locations_payload()}))
+            elif msg.type == "position":
+                # 轻量的位置更新：不触发决策，也没有回复
+                app.state.agent.update_position(msg.npc_id or "unknown", msg.payload.get("pos"))
             elif msg.type == "observation":
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)

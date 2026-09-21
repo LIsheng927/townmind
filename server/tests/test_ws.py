@@ -32,3 +32,11 @@ def test_bad_message_returns_error():
     with client.websocket_connect("/ws") as ws:
         ws.send_text("not json")
         assert ws.receive_json()["type"] == "error"
+
+
+def test_position_message_updates_position_without_reply():
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "position", "npc_id": "alice", "payload": {"pos": [3.0, 4.0]}})
+        ws.send_json({"type": "hello"})  # position 没有回复，所以下一条回复应属于 hello
+        assert ws.receive_json()["type"] == "welcome"
+    assert app.state.agent.positions["alice"] == (3.0, 4.0)

@@ -35,8 +35,17 @@ namespace TownMind.World
             if (_client != null) _client.OnMessage -= HandleMessage;
         }
 
+        private const float PositionInterval = 0.5f; // 走路时每 0.5 秒告诉服务端自己在哪
+        private float _nextPositionTime;
+
         private void Update()
         {
+            if (_client != null && _client.IsConnected && Time.time >= _nextPositionTime)
+            {
+                _nextPositionTime = Time.time + PositionInterval;
+                SendPosition(transform.position);
+            }
+
             if (_target.HasValue)
             {
                 transform.position = Vector3.MoveTowards(transform.position, _target.Value, Speed * Time.deltaTime);
@@ -73,6 +82,17 @@ namespace TownMind.World
             if (_speech == null) return;
             if (Time.time > _speechExpire) { Destroy(_speech.gameObject); return; }
             if (Camera.main != null) _speech.transform.rotation = Camera.main.transform.rotation; // 始终朝向相机
+        }
+
+        private async void SendPosition(Vector3 p)
+        {
+            // 只是通知，不需要回复；发不出去就算了，下一次会再发
+            await _client.Send(new Envelope
+            {
+                Type = "position",
+                NpcId = NpcId,
+                Payload = new Dictionary<string, object> { { "pos", new[] { p.x, p.z } } }
+            });
         }
 
         private async void SendObservation(Vector3 p)
