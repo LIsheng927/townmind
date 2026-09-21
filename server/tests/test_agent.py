@@ -36,29 +36,37 @@ def test_valid_say_is_used():
     assert decide(a) == {"name": "say", "text": "你好呀"}
 
 
+ALICE_GREETINGS = ("早上好！法棍刚出炉，要不要尝尝？", "欢迎光临，看看今天的面包吧！")
+
+
+def is_bt_greeting(r):
+    """兜底现在是行为树：旁边有邻居且允许说话时，说一句角色自己的固定台词。"""
+    return r["name"] == "say" and r["text"] in ALICE_GREETINGS
+
+
 def test_nonexistent_place_falls_back():
     a = Agent(FakeLLM(ToolCall("go_to", {"place": "月球"})))  # 大模型编了一个不存在的地点
     r = decide(a)
-    assert r["name"] == "move_to" and abs(r["x"]) <= 8 and "place" not in r  # 兜底的随机游走
+    assert is_bt_greeting(r)  # 编了不存在的地点 -> 校验失败 -> 行为树兜底
 
 
 def test_unknown_tool_falls_back():
     a = Agent(FakeLLM(ToolCall("fly", {})))
-    assert decide(a)["name"] == "move_to"
+    assert is_bt_greeting(decide(a))
 
 
 def test_llm_exception_falls_back():
     a = Agent(FakeLLM(exc=RuntimeError("boom")))
-    assert decide(a)["name"] == "move_to"
+    assert is_bt_greeting(decide(a))
 
 
 def test_timeout_falls_back():
     a = Agent(FakeLLM(ToolCall("idle", {}), delay=1.0), timeout=0.05)
-    assert decide(a)["name"] == "move_to"
+    assert is_bt_greeting(decide(a))
 
 
 def test_no_llm_falls_back():
-    assert decide(Agent(None))["name"] == "move_to"
+    assert is_bt_greeting(decide(Agent(None)))
 
 
 def test_prompt_mentions_nearby_npc():
@@ -204,7 +212,7 @@ def test_prompt_tells_how_many_lines_already_said():
 
 def test_empty_farewell_falls_back():
     a = Agent(FakeLLM(ToolCall("end_conversation", {"farewell": ""})))
-    assert decide(a)["name"] == "move_to"
+    assert is_bt_greeting(decide(a))
 
 
 # ---------- 记忆 ----------

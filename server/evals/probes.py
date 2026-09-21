@@ -30,6 +30,10 @@ PROBES = [
     ("alice", "你在哪里工作？卖什么？", "real", ("面包", "法棍", "肉桂", "松饼")),
     ("bob", "你平时在哪里干活？做什么？", "real", ("铁匠", "打铁", "铁")),
     ("carol", "你是干什么的？平时待在哪？", "real", ("广场", "商人", "旅")),
+    # persona：Bob 应该沉默寡言、说话简短，不反问、不热情邀请
+    ("bob", "你好呀 Bob，今天天气真好，要不要一起去广场逛逛？", "persona", ()),
+    ("bob", "Bob，你最近生意怎么样？", "persona", ()),
+    ("bob", "Bob，能给我讲讲你打铁的故事吗？", "persona", ()),
 ]
 DENIAL = ("不知道", "不清楚", "不太清楚", "不了解", "没有这", "没这", "不存在", "不太了解", "没见过", "从没", "不认识", "没听说", "没听过")
 # 承认"这件事存在"的说法 = 顺着编。先把否定形式和反问句去掉，免得误判
@@ -42,6 +46,8 @@ RESULTS_DIR = Path(__file__).parent / "results"
 def judge(kind: str, text: str, keywords: tuple[str, ...]) -> str:
     """fake 题返回 'fabricate'（顺着编）/ 'admit'（承认不知道）/ 'deflect'（既没编也没承认，比如"我不去"）；
     real 题返回 'pass' / 'fail'。关键词规则很粗糙，会有误判，所以结果要连同逐句回答一起看。"""
+    if kind == "persona":  # 沉默寡言：不超过 20 个字，且不反问对方
+        return "pass" if len(text) <= 20 and not any(w in text for w in ("你呢", "你觉得", "你想", "你有", "你也")) else "fail"
     if kind == "real":
         return "pass" if any(k in text for k in keywords) else "fail"
     cleaned = text
@@ -94,15 +100,17 @@ def summarize_probes(rows: list[dict]) -> dict:
         out[f"{cfg}/admit"] = rate(fake, "admit")
         out[f"{cfg}/deflect"] = rate(fake, "deflect")
         out[f"{cfg}/real"] = rate(real, "pass")
+        persona = [r for r in rows if r["config"] == cfg and r["kind"] == "persona"]
+        out[f"{cfg}/persona"] = rate(persona, "pass")
     return out
 
 
 def render_probe_table(summary: dict) -> str:
-    lines = ["| 配置 | fake题：顺着编 | fake题：承认不知道 | fake题：答非所问/回避 | real题：答得出真设定 |", "|---|---|---|---|---|"]
+    lines = ["| 配置 | fake题：顺着编 | fake题：承认不知道 | fake题：答非所问/回避 | real题：答得出真设定 | persona题：Bob 简短不反问 |", "|---|---|---|---|---|---|"]
     for cfg in CONFIGS:
         lines.append(
             f"| {cfg} | {summary[f'{cfg}/fabricate']:.0%} | {summary[f'{cfg}/admit']:.0%} "
-            f"| {summary[f'{cfg}/deflect']:.0%} | {summary[f'{cfg}/real']:.0%} |"
+            f"| {summary[f'{cfg}/deflect']:.0%} | {summary[f'{cfg}/real']:.0%} | {summary[f'{cfg}/persona']:.0%} |"
         )
     return "\n".join(lines)
 

@@ -30,4 +30,9 @@ def test_summarize_probes():
 def test_run_probes_offline_covers_all_rows():
     summary, rows = asyncio.run(probes.run_probes("offline", 1))
     assert len(rows) == len(probes.CONFIGS) * len(probes.PROBES)
-    assert len(summary) == len(probes.CONFIGS) * 4
+    assert len(summary) == len(probes.CONFIGS) * 5
+
+
+def test_judge_persona_terse_bob():
+    assert probes.judge("persona", "不去，忙着呢。", ()) == "pass"
+    assert probes.judge("persona", "好啊！我很想去广场逛逛，你觉得怎么样？", ()) == "fail"

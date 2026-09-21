@@ -17,7 +17,7 @@ from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
-from . import policy, world
+from . import fallback, policy, world
 from .llm.base import LLMClient, ToolCall
 from .memory import Memory, MemoryStore, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
@@ -149,7 +149,7 @@ class Agent:
                 action, source = self._wander(npc_id), "rule"
 
         if action is None:
-            action, source = policy.decide(npc_id, observation), "fallback"
+            action, source = self._fallback(npc_id, heard, nearby, status), "fallback"
 
         if action["name"] == "go_to":
             # 大模型只选"去哪个地点"；坐标由服务端根据世界设定算出来。Unity 仍然只认 move_to。
@@ -190,6 +190,21 @@ class Agent:
             self.stats["llm_failures"] += 1
             log.warning("[%s] LLM failed (%s: %s), using fallback", npc_id, type(e).__name__, e)
             return None, "fallback"
+
+    def _fallback(self, npc_id: str, heard, nearby, status: str) -> dict:
+        """大模型没能给出动作时，交给行为树。"""
+        p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
+        ctx = fallback.Ctx(
+            npc_id=npc_id,
+            pos=self.positions.get(npc_id, (0.0, 0.0)),
+            home=p.get("home", ""),
+            lines=p.get("lines", {}),
+            nearby=[_name(o) for o, _ in nearby],
+            heard=bool(heard),
+            can_say=status == "ok",
+            rng=self.rng,
+        )
+        return fallback.decide(ctx)
 
     def _wander(self, npc_id: str) -> dict:
         """没事发生时的日常：一部分时间发呆，其余时间在小镇的真实地点之间走动，偏爱自己的工作地点。零成本。"""
