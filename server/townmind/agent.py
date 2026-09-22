@@ -5,8 +5,10 @@ NPC 之间的对话：某个 NPC 说话时，服务端把这句话记成一条"�
 其他 NPC 下次决策时，如果当时就在附近，这句话会被写进它的提示词，它就"听到"了，
 大模型据此决定是否回应。整个对话由大模型逐句生成，没有任何预设台词。"""
 import asyncio
+import json
 import logging
 import math
+import os
 import random
 import re
 import time
@@ -22,6 +24,7 @@ from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
 from .memory import Memory, MemoryStore, _cosine, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
+from .social import RelationshipBook
 from .spatial import SpatialGrid
 
 
@@ -182,6 +185,16 @@ class Reflect(BaseModel):
     )
 
 
+class UpdateRelationship(BaseModel):
+    """一场对话结束后，对方在我心里的变化。delta 限制在 [-3, 3] 这个小范围里是故意的：
+    一次对话本来就不该把关系彻底翻转，而且 social.RelationshipBook 那边还会再做一次
+    有界缩放，两层合起来保证关系是慢慢积累出来的，不是一句话定生死。"""
+
+    affinity_delta: Annotated[int, Field(ge=-3, le=3, description="好感变化，-3 到 3，没什么感觉就给 0")]
+    trust_delta: Annotated[int, Field(ge=-3, le=3, description="信任变化，-3 到 3，没什么感觉就给 0")]
+    reason: Annotated[str, Field(min_length=1, max_length=40, description="一句话说明为什么，不超过 20 个字")]
+
+
 RATE_IMPORTANCE_TOOL = {
     "name": "rate_importance",
     "description": "给每条记忆打 1-10 的重要度分，按输入顺序一一对应",
@@ -192,6 +205,11 @@ REFLECT_TOOL = {
     "description": "从最近的记忆里提炼出一两条更高层次的感想或规律",
     "parameters": Reflect.model_json_schema(),
 }
+UPDATE_RELATIONSHIP_TOOL = {
+    "name": "update_relationship",
+    "description": "根据刚结束的这场对话，更新你对对方的好感和信任",
+    "parameters": UpdateRelationship.model_json_schema(),
+}
 IMPORTANCE_REFLECTION = 9  # 反思本身是提炼出来的高层认识，比一般琐事更值得记住
 IMPORTANCE_LESSON = 7  # Reflexion 式教训：guard 分类器实锤一次编造后提炼出的"以后要更谨慎"这类认识，
 # 故意不用 8——那是 IMPORTANCE_MET 的值，撞上了会没法区分"教训"和"第一次见到某人"这两类记忆
@@ -200,6 +218,7 @@ REFLECTION_RECENT_K = 20  # 反思时回顾最近这么多条记忆
 IMPORTANCE_META_REFLECTION = 10  # 二级反思是"感想的感想"，是整个记忆库里最抽象的一层认识，给满分
 META_REFLECTION_RECENT_K = 8  # 二级反思时回顾最近这么多条一级反思
 LORE_TOP_K = 3  # "镇上的事"语义检索之后，最多留几条塞进提示词
+RELATIONSHIP_RECENT_K = 6  # 判断关系变化时，回顾跟这个人有关的最近几条记忆
 
 
 @dataclass
@@ -250,6 +269,8 @@ class Agent:
         # 被拦下的具体内容让大模型重说一次，只重试一次；多一次 LLM 调用，默认关，等真实数据验证效果
         reflexion_lessons: bool = False,  # Reflexion 式：guard 分类器实锤一次编造之后，额外存一条高重要度的
         # "教训"记忆，让这次纠正靠语义检索在未来别的话题里也可能被想起，不只在当轮起效；默认关，等真实数据验证效果
+        use_relationships: bool = False,  # 给每个人单独记一份好感/信任，影响语气和愿不愿意把事告诉他；
+        # 每场对话结束后多一次 LLM 调用（跟反思、动态重要度一样是可选的增强），默认关，方便做消融对比
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -271,6 +292,10 @@ class Agent:
         self.expressive_dialogue = expressive_dialogue
         self.verify_and_revise = verify_and_revise
         self.reflexion_lessons = reflexion_lessons
+        self.use_relationships = use_relationships
+        # 关系册：每个 NPC 一本，记"我对谁是什么印象"。跟记忆一样按 npc_id 分开、懒加载，
+        # 落盘也跟记忆走同一个目录（见 _relation_path）
+        self._relations: dict[str, RelationshipBook] = {}
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -473,6 +498,12 @@ class Agent:
 
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
+            if ended:
+                # 要在 _remember 之后：这样"道别"这件事本身也在关系判断的素材里，
+                # 模型看到的是完整的一场对话，而不是缺了最后一句的版本
+                await self._maybe_update_relationship(
+                    npc_id, now, {o for o, _ in nearby} | {e.speaker for e in heard}
+                )
             if self.use_reflection and self.llm is not None:
                 await self._maybe_reflect(npc_id, now)
                 await self._maybe_meta_reflect(npc_id, now)
@@ -670,6 +701,81 @@ class Agent:
             store = MemoryStore.load(path) if path else MemoryStore()
             self._memories[npc_id] = store
         return store
+
+    def _relation_path(self, npc_id: str) -> Path | None:
+        if self.memory_dir is None:
+            return None
+        return self.memory_dir / (re.sub(r"[^A-Za-z0-9_-]", "_", npc_id) + ".social.json")
+
+    def _rel(self, npc_id: str) -> RelationshipBook:
+        """关系册的懒加载访问器，跟 _mem() 一个套路。读盘失败一律退化成空关系册——
+        这一层是锦上添花，坏了不该影响 NPC 还能不能正常说话。"""
+        book = self._relations.get(npc_id)
+        if book is None:
+            path = self._relation_path(npc_id)
+            book = RelationshipBook()
+            if path is not None and path.exists():
+                try:
+                    book = RelationshipBook.from_dict(json.loads(path.read_text(encoding="utf-8")))
+                except (OSError, ValueError) as e:
+                    log.warning("[%s] 关系册读不出来（%s: %s），从空的开始", npc_id, type(e).__name__, e)
+            self._relations[npc_id] = book
+        return book
+
+    def _save_relations(self, npc_id: str) -> None:
+        path = self._relation_path(npc_id)
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._rel(npc_id).to_dict(), ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, path)  # 跟 MemoryStore.save 一样：先写临时文件再替换，写一半崩溃不会毁掉原文件
+        except OSError as e:
+            log.warning("[%s] 关系册存盘失败：%s", npc_id, e)
+
+    async def _maybe_update_relationship(self, npc_id: str, now: float, others: set[str]) -> None:
+        """一场对话结束时，让大模型回头看一眼这场对话，给出对方在自己心里的变化。
+
+        为什么放在对话结束、而不是每说一句就更一次：一是成本（每句话一次 LLM 调用太贵，
+        跟整个项目"只在值得的时候才花钱问大模型"的取向冲突），二是判断质量——聊到一半
+        就下结论，很容易被一句客套话或者一句冲突带偏，聊完整场再回头看才看得出这场交流
+        到底是愉快还是别扭。
+
+        失败（超时、报错、格式不对）一律当成"这次没更新"，不动原来的关系——宁可维持旧印象，
+        也不要因为一次调用失败就把关系清零。"""
+        if not self.use_relationships or self.llm is None or not others:
+            return
+        store = self._mem(npc_id)
+        persona = PERSONAS.get(npc_id, DEFAULT_PERSONA)
+        book = self._rel(npc_id)
+        for other in sorted(others):
+            recent = [m for m in store.recall(frozenset({other}), now, k=RELATIONSHIP_RECENT_K) if other in m.people]
+            if not recent:
+                continue
+            current = book.get(other, now)
+            system = (
+                f"你是游戏小镇里的 NPC「{persona['name']}」，刚跟{_name(other)}聊完一场。"
+                f"你现在对ta的好感是 {current.affinity:.1f}、信任是 {current.trust:.1f}"
+                "（都在 -10 到 10 之间，0 是没什么感觉）。"
+                "看看下面这几件跟ta有关的事，判断这次交流之后，你对ta的好感和信任各自有什么变化。"
+                "大多数平淡的寒暄应该给 0，别每次都给分；只有真的聊得投机、或者真的让你不舒服/"
+                "觉得对方不可信，才给出非零的变化。"
+            )
+            user = "\n".join(f"- {format_age(now - m.time)}：{m.text}" for m in sorted(recent, key=lambda m: m.time))
+            call = await self._call_llm_tool(npc_id, system, user, UPDATE_RELATIONSHIP_TOOL, "relationship_calls")
+            if call is None:
+                continue
+            try:
+                upd = UpdateRelationship(**call.arguments)
+            except Exception as e:
+                log.warning("[%s] 关系更新格式不对（%s: %s），这次不动", npc_id, type(e).__name__, e)
+                continue
+            if upd.affinity_delta == 0 and upd.trust_delta == 0:
+                continue  # 没变化就不必写盘，也不必往 notes 里塞一条"没什么感觉"
+            book.apply(other, upd.affinity_delta, upd.trust_delta, upd.reason, now)
+            self.stats["relationship_updates"] += 1
+        self._save_relations(npc_id)
 
     async def _remember(self, npc_id, now, heard, nearby, action, ended) -> None:
         """把这一轮发生的事写进记忆，并给每条打上重要度。"""
@@ -1043,6 +1149,17 @@ class Agent:
                     "要先走过去、确认真的挨着它了再用 pick_up_item。"
                 )
             )
+        # 对在场的人的印象：只写真打过交道的（describe 对陌生人返回 None），
+        # 不认识的人不占提示词的地方
+        if self.use_relationships and nearby:
+            book = self._rel(npc_id)
+            impressions = [
+                line
+                for o, _ in nearby
+                if (line := book.describe(o, now, name=_name(o))) is not None
+            ]
+            if impressions:
+                lines += impressions
         if recalled:
             lines.append("你想起了：")
             lines += [f"- {format_age(now - m.time)}：{m.text}" for m in recalled]
