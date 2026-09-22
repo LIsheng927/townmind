@@ -122,6 +122,11 @@ class Memory:
     # 没有这个标记的话，同一件事会被翻来覆去讲给同一个人听，这是"会主动说话的 NPC"
     # 最容易露馅的地方。只记"讲给谁"，不记"讲过几次"：一次就够了。
     told_to: frozenset[str] = frozenset()
+    # 这条记忆属于哪条"消息"。玩家私下告诉某个 NPC 一件事时打上一个标签，之后这条消息
+    # 传到谁手里，新生成的记忆都继承同一个标签——于是"这条消息现在传到哪儿了、各人嘴里
+    # 变成了什么样"就能直接查出来，不用靠文本相似度去猜（那种猜法一转述就失效）。
+    # 空字符串 = 不属于任何被追踪的消息，也就是绝大多数日常记忆。
+    topic: str = ""
     # 归一化之后的 numpy 行向量，写入时算好，检索时直接做矩阵乘。
     #
     # 为什么不直接把 numpy 数组存进上面的 embedding 字段：dataclass 自动生成的 __eq__ 会
@@ -164,7 +169,8 @@ class MemoryStore:
 
     # ---- 存 ----
     def add(
-        self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event", hop: int = 0
+        self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event",
+        hop: int = 0, topic: str = "",
     ) -> None:
         importance = max(1, min(10, int(importance)))
         # hop 在这里只是"这是第几手"的标记，不参与打分：打折由写入方按 retold_importance()
@@ -173,7 +179,7 @@ class MemoryStore:
         emb = tuple(embedding) if embedding is not None else None
         m = Memory(
             text=text, time=now, importance=importance, people=frozenset(people),
-            embedding=emb, kind=kind, hop=hop,
+            embedding=emb, kind=kind, hop=hop, topic=topic,
         )
         m._vec = _unit_vector(emb)
         self.memories.append(m)
@@ -437,6 +443,7 @@ class MemoryStore:
                     "embedding": list(m.embedding) if m.embedding is not None else None,
                     "kind": m.kind,
                     "hop": m.hop,
+                    "topic": m.topic,
                     "told_to": sorted(m.told_to),
                 }
                 for m in self.memories
@@ -475,6 +482,8 @@ class MemoryStore:
                     # 老的记忆文件（加主动分享之前存的）没有这个字段，兜底成空集合——
                     # 最坏的结果只是这些老记忆有可能被再讲一遍，不会崩
                     told_to=frozenset(d.get("told_to", ())),
+                    # 老文件没有这个字段，兜底成空串 = 不属于任何被追踪的消息
+                    topic=d.get("topic", ""),
                 )
                 for d in data["memories"]
             ]

@@ -264,6 +264,10 @@ class SpeechEvent:
     # "不值得再说"以下，于是任何消息都只能传一手（evals/gossip_propagation.py 实测出来的，
     # 光看代码看不出来）。继承之后，越轰动的消息才真的能传得越远。
     source_importance: int | None = None
+    # 这次发言在转述哪条被追踪的消息（见 memory.Memory.topic）。听到的人把新记忆打上
+    # 同一个标签，消息就能一路被追踪下去，不用靠文本比对去猜"这还是不是那条消息"——
+    # 转述一次措辞就变了，文本比对撑不过两跳。
+    source_topic: str = ""
 
 
 @dataclass
@@ -347,6 +351,10 @@ class Agent:
         # 关系册：每个 NPC 一本，记"我对谁是什么印象"。跟记忆一样按 npc_id 分开、懒加载，
         # 落盘也跟记忆走同一个目录（见 _relation_path）
         self._relations: dict[str, RelationshipBook] = {}
+        # 每个 NPC 最近一次检索的解释（哪几条被想起来、每条的三项分数各是多少）。
+        # recall_explained() 早就写好了，但一直没有任何地方消费它——这里存一份，
+        # 前端就能把"NPC 凭什么想起这条"直接画出来，而不是只能看到它说了什么。
+        self.last_recall: dict[str, list[dict]] = {}
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -456,6 +464,63 @@ class Agent:
         self.stats["guard_model_calls"] += 1
         return safety.GuardResult(False, text, [f"guard_model_{label}"])
 
+    def whisper(self, npc_id: str, text: str, topic: str, importance: int = 9) -> dict:
+        """玩家私下告诉某一个 NPC 一件事——只有他知道，旁边的人听不见。
+
+        跟 hear_player() 的区别是关键：那个是"当众说话"，会变成一条说话事件，附近所有人
+        都听得到；这个是直接往一个人的记忆里塞一条，别人完全不知情。传话游戏要的就是这个
+        —— 从单一源头出发，才看得清消息是怎么一跳一跳扩散出去的。
+
+        打上 topic 标签之后，这条消息传到谁手里都还认得出来（见 Memory.topic），
+        rumor_trace() 就能把整条传播链还原出来。"""
+        store = self._mem(npc_id)
+        now = self.clock()
+        store.add(text, importance, now, people={"player"}, topic=topic)
+        self.stats["whispers"] += 1
+        path = self._memory_path(npc_id)
+        if path is not None:
+            try:
+                store.save(path)
+            except OSError as e:
+                log.warning("[%s] 悄悄话存盘失败：%s", npc_id, e)
+        return {"npc_id": npc_id, "topic": topic, "text": text}
+
+    def rumor_trace(self, topic: str) -> dict:
+        """一条消息现在传到哪儿了：谁知道、是第几手、各人嘴里是什么版本、从谁那儿听来的。
+
+        全靠 topic 标签，不靠文本比对——消息每转述一次措辞就变了，靠比对撑不过两跳。"""
+        knows = []
+        for npc_id, store in self._memories.items():
+            for m in store.memories:
+                if m.topic != topic:
+                    continue
+                # 第一手是玩家直接说的；之后每一手都记着"是谁对你说的"
+                teller = next((p for p in m.people if p != npc_id), None)
+                knows.append(
+                    {
+                        "npc": npc_id,
+                        "name": _name(npc_id),
+                        "hop": m.hop,
+                        "importance": m.importance,
+                        "text": m.text,
+                        "from": teller,
+                        "from_name": _name(teller) if teller else None,
+                        "at": m.time,
+                    }
+                )
+                break  # 一个 NPC 只算一次，取它最早记下的那个版本
+        knows.sort(key=lambda r: (r["hop"], r["at"]))
+        reach = len(knows)
+        return {
+            "topic": topic,
+            "reach": reach,
+            "max_hop": max((r["hop"] for r in knows), default=0),
+            "known_by": knows,
+            "unaware": sorted(
+                _name(n) for n in self._memories if n not in {r["npc"] for r in knows} and n != "player"
+            ),
+        }
+
     def update_position(self, npc_id: str, pos) -> None:
         """记录 NPC 的最新位置。Unity 走路时会定期上报，所以"谁在附近"不会用过期位置来判断。"""
         if isinstance(pos, (list, tuple)) and len(pos) == 2:
@@ -476,9 +541,16 @@ class Agent:
         # 向量；没配 embedder、或者这一轮啥也没听到附近也没人，都不会真的发一次网络请求。
         # 记忆和"镇上的事"共用同一个 query_embedding——都是同一套"这一刻在聊什么"，没必要算两次
         query_embedding = await self._embed_query(heard, nearby) if (self.use_memory or self.use_lore) else None
-        recalled = (
-            self._mem(npc_id).recall(involved, now, query_embedding=query_embedding) if self.use_memory else []
-        )
+        if self.use_memory:
+            explained = self._mem(npc_id).recall_explained(involved, now, query_embedding=query_embedding)
+            self.last_recall[npc_id] = explained
+            picked = {row["text"] for row in explained}
+            recalled = [m for m in self._mem(npc_id).memories if m.text in picked]
+            # recall_explained 已经排好序了，按它的顺序还原，别让上面这次筛选打乱名次
+            order = {row["text"]: i for i, row in enumerate(explained)}
+            recalled.sort(key=lambda m: order.get(m.text, 1_000_000))
+        else:
+            recalled = []
         relevant_town_facts = await self._select_town_facts(query_embedding) if self.use_lore else None
 
         action, source = None, "fallback"
@@ -561,6 +633,7 @@ class Agent:
                 npc_id, action["text"], now,
                 source_hop=share_hint[1].hop if share_hint is not None else None,
                 source_importance=share_hint[1].importance if share_hint is not None else None,
+                source_topic=share_hint[1].topic if share_hint is not None else "",
             )
             if share_hint is not None:
                 # 提示词里给过这条候选、而且这一轮确实说话了，就记成"跟ta讲过了"。
@@ -978,7 +1051,7 @@ class Agent:
         store = self._mem(npc_id)
         # 先把这一轮该记的事收集齐（文字、重要度、涉及的人），最后统一批量算一次 embedding
         # 再落库——比每条记忆各发一次网络请求省得多，也不会因为算向量而打乱原来的记录顺序。
-        to_add: list[tuple[str, int, set, int]] = []
+        to_add: list[tuple[str, int, set, int, str]] = []
         for e in heard:
             # 对方这句话如果是在转述一条二手消息，我听到的就是再下一手；不是转述（对方自己的
             # 话、对眼前事情的回应）就是第一手——当事人亲口说的，没有中间商。
@@ -1001,36 +1074,41 @@ class Agent:
                 retold_importance(max(IMPORTANCE_HEARD, e.source_importance or 0)) if hop else IMPORTANCE_HEARD
             )
             if "memory" in self.safety_layers and "injection" in e.flags:  # 记忆层：可疑的话只记"发生过"，不记原文，免得以后被回忆时再次注入
-                to_add.append((f"{_name(e.speaker)}说了一些奇怪的话，你没有理会", IMPORTANCE_HEARD, {e.speaker}, 0))
+                to_add.append((f"{_name(e.speaker)}说了一些奇怪的话，你没有理会", IMPORTANCE_HEARD, {e.speaker}, 0, ""))
             elif "memory" in self.safety_layers and safety.ungrounded_items(e.text) and e.speaker == "player":  # 玩家说了设定里没有的东西：不当真，不写进记忆
                 self.stats["memory_skipped_ungrounded"] += 1
             else:
-                to_add.append((f"{_name(e.speaker)}对你说：「{e.text}」", heard_importance, {e.speaker}, hop))
+                to_add.append(
+                    (f"{_name(e.speaker)}对你说：「{e.text}」", heard_importance, {e.speaker}, hop, e.source_topic)
+                )
                 if hop:
                     self.stats[f"heard_hop_{min(hop, 5)}"] += 1
         for o, _ in nearby:
             if o not in store.met:
                 store.met.add(o)
-                to_add.append((f"你第一次见到{_name(o)}", IMPORTANCE_MET, {o}, 0))
+                to_add.append((f"你第一次见到{_name(o)}", IMPORTANCE_MET, {o}, 0, ""))
         near_ids = {o for o, _ in nearby}
         names = "、".join(_name(o) for o in sorted(near_ids))
         if action["name"] == "say":
             to = f"对{names}" if names else ""
             if ended:
-                to_add.append((f"你{to}道别：「{action['text']}」", IMPORTANCE_FAREWELL, near_ids, 0))
+                to_add.append((f"你{to}道别：「{action['text']}」", IMPORTANCE_FAREWELL, near_ids, 0, ""))
             else:
-                to_add.append((f"你{to}说了「{action['text']}」", IMPORTANCE_SAID, near_ids, 0))
+                to_add.append((f"你{to}说了「{action['text']}」", IMPORTANCE_SAID, near_ids, 0, ""))
         # 重要度：默认用上面写死的常量；开了 dynamic_importance 时改成让大模型自己打分
         # （斯坦福 Generative Agents 论文里的做法），失败/关掉时用回常量，不会因为这一步
         # 出问题就丢了这批记忆
         scores = None
         if self.dynamic_importance and self.llm is not None and to_add:
-            scores = await self._rate_importance(npc_id, [text for text, _, _, _ in to_add])
-        embeddings = await self._embed_texts([text for text, _, _, _ in to_add])
-        for (text, fixed_importance, people, hop), emb, score in zip(
+            scores = await self._rate_importance(npc_id, [text for text, _, _, _, _ in to_add])
+        embeddings = await self._embed_texts([text for text, _, _, _, _ in to_add])
+        for (text, fixed_importance, people, hop, topic), emb, score in zip(
             to_add, embeddings, scores or [None] * len(to_add)
         ):
-            store.add(text, score if score is not None else fixed_importance, now, people, embedding=emb, hop=hop)
+            store.add(
+                text, score if score is not None else fixed_importance, now, people,
+                embedding=emb, hop=hop, topic=topic,
+            )
         path = self._memory_path(npc_id)
         if path is not None:
             try:
@@ -1233,13 +1311,14 @@ class Agent:
 
     def _record_speech(
         self, npc_id: str, text: str, now: float, source_hop: int | None = None,
-        source_importance: int | None = None,
+        source_importance: int | None = None, source_topic: str = "",
     ) -> None:
         pos = self.positions.get(npc_id, (0.0, 0.0))
         self.events.append(
             SpeechEvent(
                 self._next_event_id, npc_id, pos, text, now,
                 source_hop=source_hop, source_importance=source_importance,
+                source_topic=source_topic,
             )
         )
         self._next_event_id += 1
