@@ -1253,3 +1253,133 @@ def test_meta_reflection_failure_resets_counter_without_crashing_decide():
     assert r["name"] == "say"  # 主决策没受影响
     assert store.importance_since_meta_reflection < 300.0  # 清零了，不会每轮都重新触发失败的二级反思
     assert a.stats.get("meta_reflections", 0) == 0  # 没有真的生成二级反思记忆
+
+
+# ---------- 关系状态：好感度 / 信任度 ----------
+def test_relationship_updated_after_conversation_ends():
+    """一场对话结束（end_conversation）之后，才回头让大模型判断一次关系变化——
+    不是每说一句就更一次（太贵，而且聊到一半下结论容易被一句客套话带偏）。"""
+    llm = ScriptedLLM(
+        [
+            ToolCall("end_conversation", {"farewell": "我先去忙了"}),
+            ToolCall("update_relationship", {"affinity_delta": 2, "trust_delta": 1, "reason": "聊得挺投机"}),
+        ]
+    )
+    a = Agent(llm, use_relationships=True)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    rel = a._rel("alice").get("player", a.clock())
+    assert rel.affinity > 0 and rel.trust > 0
+    assert rel.interactions == 1
+    assert rel.notes == ("聊得挺投机",)
+    assert a.stats["relationship_updates"] == 1
+
+
+def test_relationship_off_by_default():
+    """跟反思、动态重要度一样：多花一次 LLM 调用的增强默认关，方便做消融对比。"""
+    llm = ScriptedLLM([ToolCall("end_conversation", {"farewell": "我先去忙了"})])
+    a = Agent(llm)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert llm.calls == []  # 队列正好用完，说明没有多要一次调用
+    assert a.stats.get("relationship_updates", 0) == 0
+
+
+def test_relationship_not_updated_while_conversation_continues():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm, use_relationships=True)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert a.stats.get("relationship_updates", 0) == 0
+
+
+def test_relationship_zero_delta_leaves_no_trace():
+    """平淡的寒暄给 0/0 时不该留下痕迹——不然 notes 会堆满"没什么感觉"、interactions 虚高，
+    describe() 就会对一个其实没什么交情的人硬写一句印象，白占提示词。"""
+    llm = ScriptedLLM(
+        [
+            ToolCall("end_conversation", {"farewell": "我先去忙了"}),
+            ToolCall("update_relationship", {"affinity_delta": 0, "trust_delta": 0, "reason": "就是寒暄两句"}),
+        ]
+    )
+    a = Agent(llm, use_relationships=True)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert a._rel("alice").get("player", a.clock()).interactions == 0
+    assert a.stats.get("relationship_updates", 0) == 0
+
+
+def test_relationship_update_failure_keeps_old_impression_and_does_not_crash():
+    """调用失败时宁可维持旧印象，也不要把关系清零——这一层是锦上添花，
+    不该因为一次网络抖动就让 NPC 忘了跟谁熟。"""
+
+    class Boom:
+        calls = 0
+
+        async def choose_tool(self, system, user, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ToolCall("end_conversation", {"farewell": "我先去忙了"})
+            raise RuntimeError("down")
+
+    a = Agent(Boom(), use_relationships=True)
+    a._rel("alice").apply("player", 4, 4, "以前处得不错", a.clock())
+    a.hear_player("你好", [1.0, 0.0])
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert r["name"] == "say"  # 道别被翻译成 say，主决策没受影响
+    rel = a._rel("alice").get("player", a.clock())
+    assert rel.interactions == 1  # 还是之前那一次，没有被这次失败改写
+    assert rel.notes == ("以前处得不错",)
+
+
+def test_relationship_impression_shows_up_in_prompt():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm, use_relationships=True)
+    a._rel("alice").apply("player", 4, 4, "上次帮了我大忙", a.clock())
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "上次帮了我大忙" in llm.users[0]
+    assert "玩家" in llm.users[0]
+
+
+def test_stranger_impression_does_not_take_up_prompt_space():
+    """没打过交道的人，describe() 返回 None，提示词里不该出现"你对玩家的印象"这种空话。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm, use_relationships=True)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "的印象" not in llm.users[0]
+
+
+def test_relationship_impression_absent_when_flag_off():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm)
+    a._rel("alice").apply("player", 4, 4, "上次帮了我大忙", a.clock())
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "上次帮了我大忙" not in llm.users[0]
+
+
+def test_relationship_survives_restart(tmp_path):
+    llm = ScriptedLLM(
+        [
+            ToolCall("end_conversation", {"farewell": "我先去忙了"}),
+            ToolCall("update_relationship", {"affinity_delta": 3, "trust_delta": 2, "reason": "帮了我一个忙"}),
+        ]
+    )
+    a = Agent(llm, use_relationships=True, memory_dir=tmp_path)
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    before = a._rel("alice").get("player", a.clock())
+
+    b = Agent(None, use_relationships=True, memory_dir=tmp_path)  # 模拟服务重启
+    after = b._rel("alice").get("player", b.clock())
+    assert after.interactions == before.interactions == 1
+    assert abs(after.affinity - before.affinity) < 0.1
+    assert after.notes == ("帮了我一个忙",)
+
+
+def test_corrupt_relationship_file_falls_back_to_empty(tmp_path):
+    (tmp_path / "alice.social.json").write_text("{坏掉的 json", encoding="utf-8")
+    a = Agent(None, use_relationships=True, memory_dir=tmp_path)
+    assert a._rel("alice").known() == []  # 读不出来就从空的开始，不该抛异常
