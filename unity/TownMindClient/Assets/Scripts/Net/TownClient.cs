@@ -26,20 +26,42 @@ namespace TownMind.Net
         private CancellationTokenSource _cts;
         private readonly ConcurrentQueue<Envelope> _inbox = new ConcurrentQueue<Envelope>();
 
+        private const float ReconnectDelaySeconds = 5f; // 跟网页版 demo（web_demo/index.html）的重连间隔保持一致
+
         private async void Start()
         {
             _cts = new CancellationTokenSource();
-            try
+            await ConnectLoop(_cts.Token);
+        }
+
+        /// <summary>连不上、或者连上了又断开，都在这里重试，不会因为"Unity 先于服务端启动"
+        /// 或者"服务端中途重启"就再也连不上了——之前的写法只在 Start() 里试一次，失败就
+        /// 彻底放弃，跟网页版 demo（onclose 里 5 秒后自动重连）不是同一个健壮程度。</summary>
+        private async Task ConnectLoop(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested)
             {
-                _ws = new ClientWebSocket();
-                await _ws.ConnectAsync(new Uri(serverUrl), _cts.Token);
-                Debug.Log($"[TownClient] connected to {serverUrl}");
-                _ = ReceiveLoop(_cts.Token);
-                await Send(new Envelope { Type = "hello" });
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[TownClient] connect failed: {e.Message}");
+                try
+                {
+                    _ws = new ClientWebSocket();
+                    await _ws.ConnectAsync(new Uri(serverUrl), ct);
+                    Debug.Log($"[TownClient] connected to {serverUrl}");
+                    await Send(new Envelope { Type = "hello" });
+                    await ReceiveLoop(ct); // 阻塞到断开为止，断开后走到下面重试
+                    Debug.LogWarning("[TownClient] disconnected, retrying...");
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[TownClient] connect failed: {e.Message}，{ReconnectDelaySeconds:0}秒后重试"
+                        + "（服务端启动了吗？cd server && uv run uvicorn townmind.main:app --port 8000）");
+                }
+                if (ct.IsCancellationRequested) break;
+                try { await Task.Delay(TimeSpan.FromSeconds(ReconnectDelaySeconds), ct); }
+                catch (OperationCanceledException) { break; }
             }
         }
 
