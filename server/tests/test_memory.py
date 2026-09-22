@@ -5,6 +5,7 @@ from townmind.memory import (
     SHARE_MIN_IMPORTANCE,
     MemoryStore,
     format_age,
+    retold_importance,
 )
 
 NOW = 1000.0
@@ -235,32 +236,27 @@ def test_shareable_ranked_by_score_and_respects_k():
 
 
 # ---------- 传播代数：消息传得越远越不当真 ----------
-def test_second_hand_memory_is_discounted():
-    s = MemoryStore()
-    s.add("第一手", 9, NOW, hop=0)
-    s.add("第二手", 9, NOW, hop=1)
-    first, second = s.memories
-    assert first.importance == 9
-    assert second.importance == round(9 * HOP_IMPORTANCE_DECAY)
-    assert second.importance < first.importance
+def test_retold_importance_discounts_once_per_telling():
+    assert retold_importance(9) == round(9 * HOP_IMPORTANCE_DECAY)
 
 
-def test_importance_never_decays_to_zero():
+def test_retold_importance_never_reaches_zero():
     """再怎么传得远，它毕竟还是件"我知道的事"，不该被压成 0 直接消失。"""
-    s = MemoryStore()
-    s.add("传了很多手", 9, NOW, hop=50)
-    assert s.memories[0].importance == 1
+    assert retold_importance(1) == 1
 
 
-def test_rumor_dies_out_after_enough_hops():
-    """有意思的涌现性质：消息会自己"传死"——转述几次之后重要度掉到分享门槛以下，
-    就没人再往下传了。这不是硬写的规则，是衰减和门槛两个数凑在一起的结果。"""
+def test_retold_importance_clamps_out_of_range_input():
+    assert retold_importance(99) == retold_importance(10)
+    assert retold_importance(-5) == retold_importance(1)
+
+
+def test_hop_is_metadata_and_does_not_discount_by_itself():
+    """打折由写入方按 retold_importance() 一次一次折下来（见 agent._remember），
+    add() 要是再按代数折一遍，就成了双重折扣。"""
     s = MemoryStore()
-    for hop in range(6):
-        s.add(f"传了{hop}手", 9, NOW, hop=hop)
-    still_worth_telling = [m.hop for m in s.memories if m.importance >= SHARE_MIN_IMPORTANCE]
-    assert still_worth_telling == [0, 1, 2]  # 第 3 手开始就没人愿意再传了
-    assert all(m.importance < SHARE_MIN_IMPORTANCE for m in s.memories if m.hop >= 3)
+    s.add("传了很多手", 9, NOW, hop=5)
+    assert s.memories[0].importance == 9
+    assert s.memories[0].hop == 5
 
 
 def test_hop_is_clamped_to_non_negative():
@@ -268,6 +264,20 @@ def test_hop_is_clamped_to_non_negative():
     s.add("负数代数", 9, NOW, hop=-3)
     assert s.memories[0].hop == 0
     assert s.memories[0].importance == 9
+
+
+def test_rumor_importance_decays_until_nobody_bothers_passing_it_on():
+    """有意思的涌现性质：消息会自己"传死"——转述几次之后重要度掉到分享门槛以下，
+    就没人再往下传了。这不是硬写的规则，是衰减系数和分享门槛两个数凑在一起的结果。
+
+    注意这条递推是"每转述一次折一次"，不是按代数一次性指数打折：听者记的是"转述者
+    当时觉得这事有多重要"再打一折，而转述者那个数本身也是这么一路折下来的。"""
+    seq, importance = [9], 9
+    while importance >= SHARE_MIN_IMPORTANCE:
+        importance = retold_importance(importance)
+        seq.append(importance)
+    assert seq == [9, 7, 6, 5]
+    assert seq[-1] < SHARE_MIN_IMPORTANCE
 
 
 # ---------- 落盘 ----------
