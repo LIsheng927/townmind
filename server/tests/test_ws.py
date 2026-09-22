@@ -63,3 +63,13 @@ def test_flags_round_trip_and_bad_input():
         assert r.status_code == 400 and "no_such_flag" in r.json()["detail"]
     finally:
         client.post("/flags", json=before)  # 别把开关留给后面的测试
+
+
+def test_welcome_carries_the_npc_roster():
+    from townmind.personas import PERSONAS
+
+    with client.websocket_connect("/ws") as ws:
+        ws.send_json({"type": "hello"})
+        npcs = ws.receive_json()["payload"]["npcs"]
+    assert {n["id"] for n in npcs} == set(PERSONAS) - {"player"}
+    assert all(n["name"] for n in npcs)

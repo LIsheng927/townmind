@@ -2,58 +2,110 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>TownMind 伙伴 Demo</title>
+<title>TownMind 实验台</title>
 <style>
-  :root { color-scheme: light; }
-  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; display: flex; height: 100vh; background: #f4f1ea; }
-  #left { flex: 0 0 auto; padding: 16px; }
-  #right { flex: 1 1 auto; padding: 16px; display: flex; flex-direction: column; min-width: 320px; }
-  canvas { background: #eae3d3; border: 2px solid #6b5b3d; border-radius: 6px; }
-  h1 { font-size: 18px; margin: 0 0 8px; }
-  #help { font-size: 13px; color: #555; line-height: 1.6; margin-bottom: 12px; white-space: pre-line; }
-  #conn { font-size: 13px; margin-bottom: 8px; }
-  #conn.ok { color: #2a7a2a; }
-  #conn.bad { color: #b33; }
-  #status { font-size: 13px; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-bottom: 12px; line-height: 1.7; }
-  #status b { color: #333; }
-  #log { flex: 1 1 auto; overflow-y: auto; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 13px; line-height: 1.6; }
-  #log .npc { color: #1a5b8a; }
-  #log .me { color: #a05a00; }
-  #log .sys { color: #888; font-style: italic; }
-  #inputRow { display: flex; gap: 6px; margin-top: 10px; }
-  #inputRow input { flex: 1; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
-  #inputRow button { padding: 8px 14px; font-size: 14px; border: none; border-radius: 4px; background: #4a7c4a; color: #fff; cursor: pointer; }
-  #inputRow button:hover { background: #3a6a3a; }
-  .bubble { position: absolute; background: #fff; border: 1px solid #333; border-radius: 8px; padding: 2px 6px; font-size: 12px; pointer-events: none; transform: translate(-50%, -140%); white-space: nowrap; }
+  :root { color-scheme: light; --ink: #2b2620; --muted: #7a7267; --line: #d9d2c4; --paper: #f6f2ea; --card: #fffdf9; --accent: #1f6f8b; --warn: #b3541e; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; min-height: 100vh; display: grid; grid-template-columns: 560px minmax(520px, 1fr); grid-template-rows: auto auto; align-items: start; background: var(--paper); color: var(--ink); font-size: 13px; }
+  header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 16px; padding: 10px 16px 6px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; }
+  header .sub { color: var(--muted); }
+  #conn { margin-left: auto; }
+  #conn.ok { color: #2a7a2a; } #conn.bad { color: #b33; }
+  #left { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  canvas { background: #ebe4d3; border: 1px solid #8c7b5c; border-radius: 6px; display: block; }
+  #right { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto auto; gap: 10px; padding: 12px 16px 12px 0; min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; overflow: auto; min-height: 0; max-height: 380px; }
+  .card h2 { font-size: 13px; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .hint { font-weight: normal; color: var(--muted); }
+  .card h2 .t { white-space: nowrap; }
+  .card h2 button, .card h2 select { margin-left: auto; }
+  button { font: inherit; padding: 4px 10px; border: 1px solid #8c7b5c; border-radius: 4px; background: #fff; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], select { font: inherit; padding: 5px 7px; border: 1px solid #ccc; border-radius: 4px; }
+  /* 开关 */
+  #flags { grid-column: 1 / -1; }
+  #flagGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 4px 14px; }
+  #flagGrid label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  #flagGrid label small { white-space: normal; line-height: 1.2; }
+  #flagGrid label small { color: var(--muted); }
+  #flagGrid .group { grid-column: 1 / -1; color: var(--muted); font-size: 11px; margin-top: 4px; border-top: 1px dashed var(--line); padding-top: 3px; }
+  #flagGrid .group:first-child { margin-top: 0; border-top: 0; }
+  #mmrRow { display: flex; align-items: center; gap: 6px; }
+  #mmrRow input { width: 90px; }
+  /* 传话 */
+  #whisperRow { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+  #whisperRow input[type=text] { flex: 1 1 200px; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 3px 6px; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { color: var(--muted); font-weight: normal; }
+  .hop { display: inline-block; min-width: 18px; text-align: center; border-radius: 9px; color: #fff; font-size: 11px; padding: 0 4px; }
+  .empty { color: var(--muted); font-style: italic; }
+  /* 召回 */
+  .bar { display: inline-block; height: 8px; vertical-align: middle; border-radius: 2px; }
+  .bar.rec { background: #5b8def; } .bar.imp { background: #e0a33a; } .bar.rel { background: #3fa26a; }
+  .legend span { margin-right: 10px; }
+  .legend i { display: inline-block; width: 10px; height: 8px; margin-right: 3px; border-radius: 2px; }
+  td.memtext { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 成本 */
+  #statGrid { display: grid; grid-template-columns: auto 1fr 1fr; gap: 2px 12px; }
+  #statGrid .k { color: var(--muted); }
+  #statGrid .big { font-size: 18px; }
+  /* 日志 */
+  #log { height: 230px; overflow-y: auto; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; line-height: 1.55; }
+  #log .npc { color: #1a5b8a; } #log .me { color: #a05a00; } #log .sys { color: #888; font-style: italic; } #log .flag { color: #7a3aa0; }
+  #inputRow { display: flex; gap: 6px; }
+  #inputRow input { flex: 1; }
+  .ctl { display: flex; gap: 6px; align-items: center; color: var(--muted); }
 </style>
 </head>
 <body>
 
+<header>
+  <h1>TownMind 实验台</h1>
+  <span class="sub">同一个小镇、同一批记忆，把某项技术当场关掉，看 NPC 的表现怎么变</span>
+  <span id="conn" class="bad">未连接</span>
+</header>
+
 <div id="left">
-  <h1>TownMind 伙伴 Demo</h1>
-  <div id="help">这是个纯网页小工具，不是 Unity——只是为了能亲眼看到 agent 的决策过程，
-不用装 Unity 也能玩。它直接连你本机跑起来的服务端，用的是真实的大模型（如果你配了 key）。
-
-先在另一个终端启动服务端：
-  cd server
-  uv run uvicorn townmind.main:app --port 8000
-
-方向键 / WASD 移动蓝色的"你"。伙伴是绿色的 Alice。
-下面输入框可以对 Alice 说话，试试：
-  "跟着我"
-  "帮我把铁剑搬到广场"
-  "帮我把剑搬到广场"（故意说得含糊，看她是不是会反问是哪把剑）
-</div>
-<div id="conn" class="bad">未连接</div>
-<canvas id="map" width="520" height="520"></canvas>
+  <canvas id="map" width="528" height="528"></canvas>
+  <div class="ctl">
+    <button id="pauseBtn">暂停小镇</button>
+    <span>WASD 移动蓝色的"你"；点地图上的 NPC 看它的召回；颜色 = 传话代数</span>
+  </div>
+  <div id="log"></div>
+  <div id="inputRow">
+    <input id="textInput" type="text" placeholder="当众说一句（附近的 NPC 都听得到）…" />
+    <button id="sendBtn">发送</button>
+  </div>
 </div>
 
 <div id="right">
-  <div id="status">连接后显示 Alice 的状态…</div>
-  <div id="log"></div>
-  <div id="inputRow">
-    <input id="textInput" type="text" placeholder="对 Alice 说点什么…" />
-    <button id="sendBtn">发送</button>
+  <div class="card" id="flags">
+    <h2><span class="t">开关</span> <span class="hint">改完立刻生效，不重启、不清记忆；重启即还原为环境变量的初值</span></h2>
+    <div id="flagGrid"><span class="empty">连接后加载…</span></div>
+  </div>
+
+  <div class="card" id="whisper">
+    <h2><span class="t">传话</span> <span class="hint">悄悄告诉一个人，看它传给谁、传几手、每一手的措辞</span></h2>
+    <div id="whisperRow">
+      <select id="whisperTo"></select>
+      <input id="whisperText" type="text" value="医馆的 Dan 昨晚把库房钥匙弄丢了，今天到处在找" />
+      <button id="whisperBtn" class="primary">悄悄说</button>
+    </div>
+    <div id="rumor"><span class="empty">还没开始。先选一个人、写一句话。开着"主动分享"才会传；再开"关系/信任"，信不过的人会被跳过。</span></div>
+  </div>
+
+  <div class="card" id="recall">
+    <h2><span class="t">召回解释</span> <span class="hint">它最近一次决策想起了什么、凭什么</span><select id="recallNpc"></select></h2>
+    <div class="legend"><span><i style="background:#5b8def"></i>新近度</span><span><i style="background:#e0a33a"></i>重要度</span><span><i style="background:#3fa26a"></i>相关度</span></div>
+    <div id="recallBody"><span class="empty">还没有决策。</span></div>
+  </div>
+
+  <div class="card" id="cost" style="grid-column: 1 / -1;">
+    <h2><span class="t">成本与机制计数</span> <span class="hint">左列：本轮（自上次清零）；右列：累计</span><button id="baselineBtn">清零本轮</button></h2>
+    <div id="statGrid"><span class="empty">连接后加载…</span></div>
   </div>
 </div>
 
@@ -61,245 +113,342 @@
 "use strict";
 
 // ---------- 配置 ----------
-const WS_URL = "ws://localhost:8000/ws";
-const COMPANION_ID = "alice";
-const WORLD_HALF = 8.0;          // 跟 townmind/policy.py 的 WORLD_HALF_SIZE 对齐
-const CANVAS_SIZE = 520;
-const WALK_SPEED = 2.5;          // 米/秒，跟 evals/sim.py 里 Unity 走路速度保持一致
-const OBSERVE_INTERVAL_MS = 2000;// 多久帮 Alice 问一次"接下来做什么"——简化：固定轮询，
-                                  // 不像真正的 Unity 客户端那样"走到才问"，够用来看效果了
-const STATUS_POLL_MS = 1000;
-const MOVE_STEP = 0.15;          // 玩家每次按键挪动的距离
+const HTTP = location.origin.startsWith("http") ? location.origin : "http://localhost:8000";
+const WS_URL = HTTP.replace(/^http/, "ws") + "/ws";
+const WORLD_HALF = 8.0;      // 跟 townmind/policy.py 的 WORLD_HALF_SIZE 对齐
+const CANVAS = 528;
+const SPEED = 2.5;           // 米/秒，跟 evals/sim.py 一致
+const TICK_MS = 200;
+const POLL_MS = 2000;
+// 出生点跟 evals/sim.py 的 START_POSITIONS 一致，这样网页上看到的和评测里跑的是同一个小镇；
+// 名单以服务端 welcome 里的 npcs 为准，这里只是给每个人一个起点，没列到的随机放。
+const START = { alice: [-3, 0], bob: [0, 3], carol: [3, -2], dan: [5, 0], elsa: [-5, 0], finn: [-1.5, 4.5], greta: [2, 2], iris: [-4, 2], jonas: [1, -2], milo: [-1, -1] };
+const HOP_COLORS = ["#c0392b", "#e67e22", "#d4ac0d", "#27ae60", "#2980b9", "#8e44ad"];
+const UNAWARE = "#9a9a9a";
 
-// ---------- 坐标转换：世界坐标 [-8,8] <-> 画布像素 ----------
-function toCanvas(x, z) {
-  const px = (x + WORLD_HALF) / (WORLD_HALF * 2) * CANVAS_SIZE;
-  const py = (WORLD_HALF - z) / (WORLD_HALF * 2) * CANVAS_SIZE; // z 轴朝上画
-  return [px, py];
-}
+// 开关的显示名和一句话说明。顺序就是面板顺序；分组是给人看的，服务端不分组。
+const FLAG_META = [
+  ["group", "记忆检索"],
+  ["use_memory", "记忆检索", "关掉 = NPC 每轮都失忆"],
+  ["normalize_relevance", "相关度归一化", "关掉 = 对题但不重要的记忆会输给不对题但重要的"],
+  ["mmr", "MMR λ", "1.0 = 关掉多样性去重，只按分数取 top-k"],
+  ["group", "社交"],
+  ["use_gossip", "主动分享（八卦）", "关掉 = 悄悄话谁也传不出去"],
+  ["use_relationships", "关系 / 信任", "开着 = 信不过的人听不到你知道的事"],
+  ["compress_conversations", "对话压缩", "对话散场后把流水账压成一条摘要"],
+  ["group", "其他增强（每个都多一次 LLM 调用）"],
+  ["dynamic_importance", "动态重要度", "让大模型给每条记忆打分"],
+  ["use_reflection", "反思", "把若干事件提炼成更高层认识"],
+  ["distrust_own_memory", "不轻信自述", "提示词里提醒别把自己以前说过的当事实"],
+  ["expressive_dialogue", "表达力提示词", "关掉 = 旧版复述+反问套路"],
+  ["verify_and_revise", "CoVe 重试", "被拦下的回复带着原因重说一次（实测无收益）"],
+  ["reflexion_lessons", "Reflexion 教训", "被实锤编造后存一条教训记忆（实测无收益）"],
+];
+
+// 成本面板要看的计数器：键、显示名。llm/rule/fallback 是"这轮决策是谁拍板的"。
+const STAT_META = [
+  ["llm", "大模型决策"], ["rule", "规则决策"], ["fallback", "兜底决策"],
+  ["llm_calls", "LLM 调用"], ["llm_failures", "调用失败"], ["tokens_in", "输入 token"], ["tokens_out", "输出 token"],
+  ["share_hints", "分享候选"], ["shares_told", "真的说出去了"], ["share_blocked_by_distrust", "因不信任没说"],
+  ["heard_marked_as_hearsay", "听来的按传闻记"], ["conversations_ended_by_timeout", "对话自然散场"],
+  ["conversations_compressed", "压缩的对话"], ["lines_compressed", "压掉的流水账"],
+  ["reflections", "反思"], ["relationship_updates", "关系更新"], ["guard_blocked", "输出被拦"],
+];
 
 // ---------- 状态 ----------
 let ws = null;
-let locations = [];
-let items = [];
-let player = { x: 0, z: -2 };
-let companion = { x: -2, z: 0, target: null, targetSetAt: 0, fromX: -2, fromZ: 0 };
-let companionBubble = null; // {text, until}
-let lastStatus = null;
+let locations = [], items = [];
+let npcs = [];                       // [{id, name, home, x, z, target, nextReport, bubble}]
+const byId = {};
+let player = { x: 0, z: -6 };
+let paused = false;
+let flags = null;
+let topic = null;                    // 当前传话的 topic 标签
+let rumor = null;                    // /rumor/{topic} 的最新结果
+let recallNpc = "alice";
+let stats = null, baseline = {};
 
 const canvas = document.getElementById("map");
 const ctx = canvas.getContext("2d");
 const logEl = document.getElementById("log");
-const statusEl = document.getElementById("status");
 const connEl = document.getElementById("conn");
 
 function log(cls, text) {
   const line = document.createElement("div");
   line.className = cls;
-  const t = new Date().toLocaleTimeString();
-  line.textContent = `[${t}] ${text}`;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
   logEl.appendChild(line);
+  while (logEl.childElementCount > 300) logEl.removeChild(logEl.firstChild);
   logEl.scrollTop = logEl.scrollHeight;
 }
-
-// ---------- 绘制 ----------
-function draw() {
-  ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
-
-  // 地点
-  ctx.font = "12px sans-serif";
-  for (const loc of locations) {
-    const [px, py] = toCanvas(loc.x, loc.z);
-    ctx.fillStyle = "#c9b98a";
-    ctx.fillRect(px - 22, py - 16, 44, 32);
-    ctx.strokeStyle = "#6b5b3d";
-    ctx.strokeRect(px - 22, py - 16, 44, 32);
-    ctx.fillStyle = "#333";
-    ctx.textAlign = "center";
-    ctx.fillText(loc.name, px, py + 30);
-  }
-
-  // 物品
-  for (const it of items) {
-    const [px, py] = toCanvas(it.x, it.z);
-    ctx.fillStyle = "#a33";
-    ctx.beginPath();
-    ctx.arc(px, py, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#333";
-    ctx.fillText(it.name, px, py - 10);
-  }
-
-  // 玩家
-  {
-    const [px, py] = toCanvas(player.x, player.z);
-    ctx.fillStyle = "#2a5ea8";
-    ctx.beginPath();
-    ctx.arc(px, py, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#333";
-    ctx.fillText("你", px, py - 14);
-  }
-
-  // 伙伴
-  {
-    const [px, py] = toCanvas(companion.x, companion.z);
-    ctx.fillStyle = "#3a8a3a";
-    ctx.beginPath();
-    ctx.arc(px, py, 9, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#333";
-    ctx.fillText("Alice" + (lastStatus && lastStatus.following ? "（跟随中）" : ""), px, py - 14);
-    if (companionBubble && Date.now() < companionBubble.until) {
-      ctx.fillStyle = "#fff";
-      ctx.strokeStyle = "#333";
-      const w = ctx.measureText(companionBubble.text).width + 12;
-      ctx.fillRect(px - w / 2, py - 42, w, 20);
-      ctx.strokeRect(px - w / 2, py - 42, w, 20);
-      ctx.fillStyle = "#000";
-      ctx.fillText(companionBubble.text, px, py - 28);
-    }
-  }
-
-  requestAnimationFrame(animate);
+function toCanvas(x, z) { return [(x + WORLD_HALF) / (WORLD_HALF * 2) * CANVAS, (WORLD_HALF - z) / (WORLD_HALF * 2) * CANVAS]; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+async function getJSON(path) { const r = await fetch(HTTP + path); if (!r.ok) throw new Error(path + " " + r.status); return r.json(); }
+async function postJSON(path, body) {
+  const r = await fetch(HTTP + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.detail || r.status);
+  return data;
 }
 
-let lastFrameTime = performance.now();
-function animate(now) {
-  const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
-  lastFrameTime = now;
-  if (companion.target) {
-    const dx = companion.target.x - companion.x;
-    const dz = companion.target.z - companion.z;
-    const dist = Math.hypot(dx, dz);
-    const step = WALK_SPEED * dt;
-    if (dist <= step || dist < 0.01) {
-      companion.x = companion.target.x;
-      companion.z = companion.target.z;
-      companion.target = null;
-    } else {
-      companion.x += (dx / dist) * step;
-      companion.z += (dz / dist) * step;
+// ---------- 小镇驱动：网页自己当 Unity，按 evals/sim.py 的节奏驱动所有 NPC ----------
+function hopOf(id) {
+  if (!rumor) return null;
+  const row = rumor.known_by.find(r => r.npc === id);
+  return row ? row.hop : null;
+}
+function draw() {
+  ctx.clearRect(0, 0, CANVAS, CANVAS);
+  ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+  for (const loc of locations) {
+    const [px, py] = toCanvas(loc.x, loc.z);
+    ctx.fillStyle = "#cdbd90"; ctx.fillRect(px - 24, py - 16, 48, 32);
+    ctx.strokeStyle = "#6b5b3d"; ctx.strokeRect(px - 24, py - 16, 48, 32);
+    ctx.fillStyle = "#555"; ctx.fillText(loc.name, px, py + 30);
+  }
+  for (const it of items) {
+    const [px, py] = toCanvas(it.x, it.z);
+    ctx.fillStyle = "#a33"; ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // 传播链：从"谁告诉的"画到"谁听到的"
+  if (rumor) {
+    for (const r of rumor.known_by) {
+      if (!r.from || !byId[r.from] || !byId[r.npc]) continue;
+      const [ax, ay] = toCanvas(byId[r.from].x, byId[r.from].z);
+      const [bx, by] = toCanvas(byId[r.npc].x, byId[r.npc].z);
+      ctx.strokeStyle = HOP_COLORS[Math.min(r.hop, HOP_COLORS.length - 1)]; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      const ang = Math.atan2(by - ay, bx - ax);
+      ctx.beginPath(); ctx.moveTo(bx - 12 * Math.cos(ang), by - 12 * Math.sin(ang));
+      ctx.lineTo(bx - 20 * Math.cos(ang - 0.4), by - 20 * Math.sin(ang - 0.4));
+      ctx.lineTo(bx - 20 * Math.cos(ang + 0.4), by - 20 * Math.sin(ang + 0.4)); ctx.closePath();
+      ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+      ctx.lineWidth = 1;
     }
   }
-  draw();
+  for (const n of npcs) {
+    const [px, py] = toCanvas(n.x, n.z);
+    const hop = hopOf(n.id);
+    ctx.fillStyle = hop === null ? UNAWARE : HOP_COLORS[Math.min(hop, HOP_COLORS.length - 1)];
+    ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fill();
+    if (n.id === recallNpc) { ctx.strokeStyle = "#000"; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1; }
+    ctx.fillStyle = "#222"; ctx.fillText(n.name + (hop === null ? "" : ` ·${hop}手`), px, py - 14);
+    if (n.bubble && Date.now() < n.bubble.until) {
+      const t = n.bubble.text.length > 22 ? n.bubble.text.slice(0, 22) + "…" : n.bubble.text;
+      const w = ctx.measureText(t).width + 12;
+      ctx.fillStyle = "#fff"; ctx.strokeStyle = "#333";
+      ctx.fillRect(px - w / 2, py - 44, w, 20); ctx.strokeRect(px - w / 2, py - 44, w, 20);
+      ctx.fillStyle = "#000"; ctx.fillText(t, px, py - 30);
+    }
+  }
+  { const [px, py] = toCanvas(player.x, player.z);
+    ctx.fillStyle = "#2a5ea8"; ctx.beginPath(); ctx.arc(px, py, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#222"; ctx.fillText("你", px, py - 14); }
+  requestAnimationFrame(draw);
+}
+
+let lastTick = performance.now();
+function tick() {
+  const now = performance.now();
+  const dt = Math.min(0.5, (now - lastTick) / 1000);
+  lastTick = now;
+  if (paused || !ws || ws.readyState !== WebSocket.OPEN) return;
+  const t = now / 1000;
+  for (const n of npcs) {
+    if (n.target) {
+      const dx = n.target[0] - n.x, dz = n.target[1] - n.z, dist = Math.hypot(dx, dz);
+      if (dist <= SPEED * dt) { n.x = n.target[0]; n.z = n.target[1]; n.target = null; }
+      else { n.x += dx / dist * SPEED * dt; n.z += dz / dist * SPEED * dt; }
+      if (t >= n.nextPos) { n.nextPos = t + 1.0; send({ type: "position", npc_id: n.id, payload: { pos: [n.x, n.z] } }); }
+    } else if (n.pending && t - n.sentAt > 15) {
+      n.pending = false;  // 服务端这轮没回（超时/异常），别让这个人永远卡住
+    } else if (t >= n.nextReport && !n.pending) {
+      n.pending = true; n.sentAt = t;
+      send({ type: "observation", npc_id: n.id, payload: { pos: [n.x, n.z] } });
+    }
+  }
+}
+function applyAction(n, a) {
+  const t = performance.now() / 1000;
+  n.pending = false;
+  n.nextReport = t + 1.0;
+  if (a.name === "move_to") n.target = [a.x, a.z];
+  else if (a.name === "say") { n.bubble = { text: a.text, until: Date.now() + 3500 }; n.nextReport = t + 3.0; log("npc", `${n.name}：${a.text}`); }
+  else if (a.name === "idle") n.nextReport = t + (a.seconds || 1);
 }
 
 // ---------- WebSocket ----------
 function connect() {
   ws = new WebSocket(WS_URL);
-  ws.onopen = () => {
-    connEl.textContent = "已连接，正在打招呼…";
-    connEl.className = "ok";
-    send({ type: "hello" });
-  };
-  ws.onclose = () => {
-    connEl.textContent = "连接断开，5 秒后重试…（服务端启动了吗？uv run uvicorn townmind.main:app --port 8000）";
-    connEl.className = "bad";
-    setTimeout(connect, 5000);
-  };
-  ws.onerror = () => { /* onclose 会跟着触发，这里不重复处理 */ };
-  ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-    handleMessage(msg);
-  };
+  ws.onopen = () => { connEl.textContent = "已连接…"; connEl.className = "ok"; send({ type: "hello" }); };
+  ws.onclose = () => { connEl.textContent = "断开，5 秒后重试（服务端：uv run uvicorn townmind.main:app --port 8000）"; connEl.className = "bad"; setTimeout(connect, 5000); };
+  ws.onmessage = ev => handle(JSON.parse(ev.data));
 }
-
-function send(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-}
-
-function handleMessage(msg) {
+function send(o) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(o)); }
+function handle(msg) {
   if (msg.type === "welcome") {
-    locations = msg.payload.locations || [];
-    items = msg.payload.items || [];
-    connEl.textContent = `已连接（server ${msg.payload.version || "?"}）`;
-    log("sys", "已连接服务端，地图加载完成。");
-    sendPlayerPosition();
-    requestObservation();
-    setInterval(requestObservation, OBSERVE_INTERVAL_MS);
-    setInterval(requestStatus, STATUS_POLL_MS);
-  } else if (msg.type === "action" && msg.npc_id === COMPANION_ID) {
-    applyCompanionAction(msg.payload);
-  } else if (msg.type === "status" && msg.npc_id === COMPANION_ID) {
-    lastStatus = msg.payload;
-    renderStatus();
+    locations = msg.payload.locations || []; items = msg.payload.items || [];
+    const t = performance.now() / 1000;
+    npcs = (msg.payload.npcs || []).map((p, i) => {
+      const s = START[p.id] || [Math.random() * 10 - 5, Math.random() * 10 - 5];
+      return { ...p, x: s[0], z: s[1], target: null, nextReport: t + i * 0.3, nextPos: 0, pending: false, bubble: null };
+    });
+    for (const n of npcs) byId[n.id] = n;
+    connEl.textContent = `已连接（server ${msg.payload.version || "?"}，${npcs.length} 个 NPC）`;
+    log("sys", `已连接，${npcs.length} 个 NPC 开始活动。`);
+    fillSelects();
+    loadFlags(); pollAll();
+  } else if (msg.type === "action" && byId[msg.npc_id]) {
+    applyAction(byId[msg.npc_id], msg.payload);
   } else if (msg.type === "error") {
     log("sys", "服务端报错：" + JSON.stringify(msg.payload));
   }
 }
 
-function applyCompanionAction(action) {
-  if (action.name === "move_to") {
-    companion.target = { x: action.x, z: action.z };
-  } else if (action.name === "say") {
-    companionBubble = { text: action.text, until: Date.now() + 3000 };
-    log("npc", "Alice：" + action.text);
-  } else if (action.name === "idle") {
-    // 什么都不用画，等下一轮
+// ---------- 开关面板 ----------
+async function loadFlags() {
+  try { flags = await getJSON("/flags"); renderFlags(); }
+  catch (e) { document.getElementById("flagGrid").innerHTML = `<span class="empty">读不到 /flags：${esc(e.message)}</span>`; }
+}
+function renderFlags() {
+  const grid = document.getElementById("flagGrid");
+  grid.innerHTML = "";
+  for (const row of FLAG_META) {
+    if (row[0] === "group") { const g = document.createElement("div"); g.className = "group"; g.textContent = row[1]; grid.appendChild(g); continue; }
+    const [key, label, hint] = row;
+    if (key === "mmr") {
+      const d = document.createElement("div"); d.id = "mmrRow";
+      d.innerHTML = `<span>${label}</span><input type="range" min="0" max="1" step="0.1" value="${flags.mmr_lambda}"><b id="mmrVal">${flags.mmr_lambda}</b><small style="color:#7a7267">${esc(hint)}</small>`;
+      const r = d.querySelector("input");
+      r.addEventListener("input", () => { d.querySelector("#mmrVal").textContent = r.value; });
+      r.addEventListener("change", () => setFlag("mmr_lambda", parseFloat(r.value), label));
+      grid.appendChild(d); continue;
+    }
+    if (!(key in flags)) continue;
+    const l = document.createElement("label");
+    l.innerHTML = `<input type="checkbox" ${flags[key] ? "checked" : ""}> ${esc(label)} <small>${esc(hint)}</small>`;
+    l.querySelector("input").addEventListener("change", ev => setFlag(key, ev.target.checked, label));
+    grid.appendChild(l);
   }
 }
-
-function renderStatus() {
-  if (!lastStatus) return;
-  const following = lastStatus.following ? "是" : "否";
-  const holding = lastStatus.holding ? lastStatus.holding : "（空手）";
-  const task = lastStatus.task ? `把「${lastStatus.task.item}」送到「${lastStatus.task.destination}」` : "（没有任务）";
-  statusEl.innerHTML =
-    `<b>跟随中：</b>${following}　<b>手上拿着：</b>${holding}<br/><b>当前任务：</b>${task}`;
+async function setFlag(key, value, label) {
+  try {
+    flags = await postJSON("/flags", { [key]: value });
+    log("flag", `开关：${label} → ${value}`);
+  } catch (e) { log("sys", `改开关失败：${e.message}`); }
+  renderFlags();
 }
 
-function requestObservation() {
-  send({ type: "observation", npc_id: COMPANION_ID, payload: { pos: [companion.x, companion.z] } });
-}
-function requestStatus() {
-  send({ type: "status_query", npc_id: COMPANION_ID, payload: {} });
-}
-let lastPosSent = 0;
-function sendPlayerPosition() {
-  const now = Date.now();
-  if (now - lastPosSent < 150) return; // 简单节流，别刷太快
-  lastPosSent = now;
-  send({ type: "position", npc_id: "player", payload: { pos: [player.x, player.z] } });
-}
-
-// ---------- 玩家操控 ----------
-const keys = new Set();
-window.addEventListener("keydown", (e) => { keys.add(e.key.toLowerCase()); });
-window.addEventListener("keyup", (e) => { keys.delete(e.key.toLowerCase()); });
-
-function movePlayerLoop() {
-  let dx = 0, dz = 0;
-  if (keys.has("arrowup") || keys.has("w")) dz += 1;
-  if (keys.has("arrowdown") || keys.has("s")) dz -= 1;
-  if (keys.has("arrowleft") || keys.has("a")) dx -= 1;
-  if (keys.has("arrowright") || keys.has("d")) dx += 1;
-  if (dx || dz) {
-    const norm = Math.hypot(dx, dz) || 1;
-    player.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.x + (dx / norm) * MOVE_STEP));
-    player.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.z + (dz / norm) * MOVE_STEP));
-    sendPlayerPosition();
+// ---------- 传话 ----------
+function fillSelects() {
+  for (const id of ["whisperTo", "recallNpc"]) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = npcs.map(n => `<option value="${n.id}">${esc(n.name)}</option>`).join("");
   }
-  requestAnimationFrame(movePlayerLoop);
+  document.getElementById("recallNpc").value = recallNpc;
 }
-
-// ---------- 发指令 ----------
-document.getElementById("sendBtn").addEventListener("click", sendText);
-document.getElementById("textInput").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") sendText();
+document.getElementById("whisperBtn").addEventListener("click", () => {
+  const to = document.getElementById("whisperTo").value;
+  const text = document.getElementById("whisperText").value.trim();
+  if (!text || !to) return;
+  // 每次一个新标签：老标签的记忆还在盘上，混在一起就分不清这次传到哪了
+  topic = "r" + Date.now().toString(36).slice(-5);
+  rumor = null;
+  send({ type: "whisper", npc_id: to, payload: { text, topic } });
+  log("me", `你悄悄告诉 ${byId[to].name}：${text}（topic=${topic}）`);
+  setTimeout(pollRumor, 300);
 });
-function sendText() {
-  const input = document.getElementById("textInput");
-  const text = input.value.trim();
-  if (!text) return;
-  send({ type: "player_say", payload: { text, pos: [player.x, player.z] } });
-  log("me", "你：" + text);
-  input.value = "";
+async function pollRumor() {
+  if (!topic) return;
+  try { rumor = await getJSON("/rumor/" + encodeURIComponent(topic)); renderRumor(); } catch (e) { /* 下次再试 */ }
 }
+function renderRumor() {
+  const el = document.getElementById("rumor");
+  if (!rumor) return;
+  const rows = rumor.known_by.map(r => `<tr>
+    <td><span class="hop" style="background:${HOP_COLORS[Math.min(r.hop, HOP_COLORS.length - 1)]}">${r.hop}</span></td>
+    <td>${esc(r.name)}</td><td>${r.from_name ? "← " + esc(r.from_name) : "← 你"}</td>
+    <td>${r.importance}</td><td class="memtext" title="${esc(r.text)}">${esc(r.text)}</td></tr>`).join("");
+  el.innerHTML = `<div style="margin-bottom:4px">topic <code>${esc(rumor.topic)}</code>：<b>${rumor.reach}</b> 人知道，最远 <b>${rumor.max_hop}</b> 手；不知道：${rumor.unaware.length ? esc(rumor.unaware.join("、")) : "无"}</div>
+    <table><tr><th>手</th><th>谁</th><th>从谁</th><th>重要度</th><th>记成了什么</th></tr>${rows}</table>`;
+}
+
+// ---------- 召回解释 ----------
+document.getElementById("recallNpc").addEventListener("change", ev => { recallNpc = ev.target.value; pollRecall(); });
+canvas.addEventListener("click", ev => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  let best = null, bd = 16;
+  for (const n of npcs) { const [px, py] = toCanvas(n.x, n.z); const d = Math.hypot(px - mx, py - my); if (d < bd) { bd = d; best = n; } }
+  if (best) { recallNpc = best.id; document.getElementById("recallNpc").value = recallNpc; pollRecall(); }
+});
+async function pollRecall() {
+  try { const r = await getJSON("/recall/" + recallNpc); renderRecall(r.recalled); } catch (e) { /* ignore */ }
+}
+function renderRecall(list) {
+  const el = document.getElementById("recallBody");
+  if (!list || !list.length) { el.innerHTML = `<span class="empty">${esc(byId[recallNpc]?.name || recallNpc)} 还没有过一次带记忆的决策。</span>`; return; }
+  const bar = (cls, v) => `<span class="bar ${cls}" style="width:${Math.round(Math.max(0, Math.min(1, v)) * 60)}px"></span>`;
+  el.innerHTML = `<table><tr><th>记忆</th><th>新近</th><th>重要</th><th>相关</th><th>总分</th></tr>` +
+    list.map(m => `<tr><td class="memtext" title="${esc(m.text)}">${esc(m.text)}</td>
+      <td>${bar("rec", m.recency)} ${m.recency.toFixed(2)}</td><td>${bar("imp", m.importance)} ${m.importance.toFixed(2)}</td>
+      <td>${bar("rel", m.relevance)} ${m.relevance.toFixed(2)}</td><td><b>${m.total.toFixed(2)}</b></td></tr>`).join("") + `</table>`;
+}
+
+// ---------- 成本 ----------
+document.getElementById("baselineBtn").addEventListener("click", () => { baseline = { ...(stats || {}) }; renderStats(); log("sys", "本轮计数已清零——现在改一个开关，跑一会儿，再看左列。"); });
+async function pollStats() {
+  try { stats = await getJSON("/stats"); renderStats(); } catch (e) { /* ignore */ }
+}
+function renderStats() {
+  if (!stats) return;
+  const d = k => (stats[k] || 0) - (baseline[k] || 0);
+  const rate = (a, b, c) => { const n = a + b + c; return n ? (100 * a / n).toFixed(1) + "%" : "—"; };
+  let html = `<span class="k">调用率（大模型决策 / 全部决策）</span><span class="big">${rate(d("llm"), d("rule"), d("fallback"))}</span><span class="big" style="color:#7a7267">${rate(stats.llm || 0, stats.rule || 0, stats.fallback || 0)}</span>`;
+  for (const [k, label] of STAT_META) {
+    if (!(k in stats) && !(k in baseline)) continue;
+    html += `<span class="k">${esc(label)}</span><span>${d(k)}</span><span style="color:#7a7267">${stats[k] || 0}</span>`;
+  }
+  html += `<span class="k">熔断器</span><span></span><span style="color:#7a7267">${esc(stats.breaker || "")}</span>`;
+  document.getElementById("statGrid").innerHTML = html;
+}
+function pollAll() { pollStats(); pollRecall(); pollRumor(); }
+setInterval(pollAll, POLL_MS);
+
+// ---------- 玩家 ----------
+const keys = new Set();
+window.addEventListener("keydown", e => { if (e.target.tagName !== "INPUT") keys.add(e.key.toLowerCase()); });
+window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+let lastPosSent = 0;
+function movePlayer() {
+  let dx = 0, dz = 0;
+  if (keys.has("w") || keys.has("arrowup")) dz += 1; if (keys.has("s") || keys.has("arrowdown")) dz -= 1;
+  if (keys.has("a") || keys.has("arrowleft")) dx -= 1; if (keys.has("d") || keys.has("arrowright")) dx += 1;
+  if (dx || dz) {
+    const n = Math.hypot(dx, dz);
+    player.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.x + dx / n * 0.15));
+    player.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.z + dz / n * 0.15));
+    if (Date.now() - lastPosSent > 150) { lastPosSent = Date.now(); send({ type: "position", npc_id: "player", payload: { pos: [player.x, player.z] } }); }
+  }
+  requestAnimationFrame(movePlayer);
+}
+document.getElementById("sendBtn").addEventListener("click", sayAloud);
+document.getElementById("textInput").addEventListener("keydown", e => { if (e.key === "Enter") sayAloud(); });
+function sayAloud() {
+  const input = document.getElementById("textInput");
+  const text = input.value.trim(); if (!text) return;
+  send({ type: "player_say", payload: { text, pos: [player.x, player.z] } });
+  log("me", "你（当众）：" + text); input.value = "";
+}
+document.getElementById("pauseBtn").addEventListener("click", ev => {
+  paused = !paused; ev.target.textContent = paused ? "继续小镇" : "暂停小镇";
+  log("sys", paused ? "已暂停：NPC 不再请求决策，不花钱。" : "继续。");
+});
 
 // ---------- 启动 ----------
-requestAnimationFrame(movePlayerLoop);
-requestAnimationFrame(animate);
+setInterval(tick, TICK_MS);
+requestAnimationFrame(draw);
+requestAnimationFrame(movePlayer);
 connect();
 </script>
 </body>
