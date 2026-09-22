@@ -26,6 +26,10 @@ DEFAULT_TOP_K = 5
 # 反思（同样出自 Stanford 那篇论文）：累计重要度一旦过了这个数，就该停下来回顾一遍最近的事、
 # 提炼出更高层次的认识了——数值跟论文里"重要度分数之和越过阈值"的量级保持一致。
 REFLECTION_THRESHOLD = 150.0
+# MMR（Maximal Marginal Relevance）：top-k 排序完之后，会不会因为好几条记忆内容高度相似
+# 而一起挤进来、占掉本该属于"另一件事"的名额。lambda 越接近 1，越只看分数本身（退化成
+# 纯 top-k）；越接近 0，越优先追求多样性。0.7 是个"以相关性为主、但不完全无视重复"的取值。
+MMR_LAMBDA = 0.7
 
 
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -58,9 +62,15 @@ def format_age(seconds: float) -> str:
 
 
 class MemoryStore:
-    def __init__(self, capacity: int = DEFAULT_CAPACITY, half_life: float = RECENCY_HALF_LIFE) -> None:
+    def __init__(
+        self,
+        capacity: int = DEFAULT_CAPACITY,
+        half_life: float = RECENCY_HALF_LIFE,
+        mmr_lambda: float = MMR_LAMBDA,
+    ) -> None:
         self.capacity = capacity
         self.half_life = half_life
+        self.mmr_lambda = mmr_lambda
         self.memories: list[Memory] = []
         self.met: set[str] = set()  # 已经见过的人，用来判断"第一次见到"
         self.importance_since_reflection: float = 0.0  # 上次反思以来，新记忆的重要度累计到了多少
@@ -84,7 +94,10 @@ class MemoryStore:
         self.importance_since_reflection = 0.0
 
     # ---- 取 ----
-    def score(self, m: Memory, involved, now: float, query_embedding=None) -> float:
+    def component_scores(self, m: Memory, involved, now: float, query_embedding=None) -> tuple[float, float, float]:
+        """新近度、重要度、相关度三项分开返回（score() 就是把这三个加起来）。拆开单独暴露
+        出来是为了能回答"这条记忆凭什么被想起来"——调试、给人演示、或者做消融实验
+        （对比只用哪几项排序）都要用到这个拆分，而不是只有一个糊在一起的总分。"""
         recency = 0.5 ** (max(0.0, now - m.time) / self.half_life)
         importance = m.importance / 10
         if query_embedding is not None and m.embedding is not None:
@@ -93,11 +106,67 @@ class MemoryStore:
             relevance = max(0.0, _cosine(query_embedding, m.embedding))
         else:
             relevance = 1.0 if (m.people & frozenset(involved)) else 0.0
-        return recency + importance + relevance
+        return recency, importance, relevance
+
+    def score(self, m: Memory, involved, now: float, query_embedding=None) -> float:
+        return sum(self.component_scores(m, involved, now, query_embedding))
 
     def recall(self, involved, now: float, k: int = DEFAULT_TOP_K, query_embedding=None) -> list[Memory]:
-        ranked = sorted(self.memories, key=lambda m: self.score(m, involved, now, query_embedding), reverse=True)
-        return ranked[:k]
+        return self._rank(involved, now, k, query_embedding)
+
+    def recall_explained(self, involved, now: float, k: int = DEFAULT_TOP_K, query_embedding=None) -> list[dict]:
+        """跟 recall() 排序逻辑完全一致，只是把三项子分数也一起带出来——调试和演示专用。
+        recall() 本身的返回值（list[Memory]）不变，不影响任何现有调用方。"""
+        picked = self._rank(involved, now, k, query_embedding)
+        out = []
+        for m in picked:
+            recency, importance, relevance = self.component_scores(m, involved, now, query_embedding)
+            out.append(
+                {
+                    "text": m.text,
+                    "recency": round(recency, 3),
+                    "importance": round(importance, 3),
+                    "relevance": round(relevance, 3),
+                    "total": round(recency + importance + relevance, 3),
+                }
+            )
+        return out
+
+    def _rank(self, involved, now: float, k: int, query_embedding=None) -> list[Memory]:
+        """recall() / recall_explained() 共用的排序逻辑：先按三项加权总分排一次序；如果这次
+        查询带了语义向量、而且候选里至少两条记忆有 embedding，再用 MMR 重排一遍 top-k——纯按
+        分数排序不会管"选出来的这几条彼此像不像"，好几条内容高度相似的记忆可能会一起挤进来，
+        占掉本该属于"另一件事"的名额，MMR 是检索里处理这个问题的经典做法。没配 embedding、
+        或者候选里带向量的不到两条，直接退化成原来的纯 top-k，不影响没接语义检索时的行为。"""
+        scored = [(m, self.score(m, involved, now, query_embedding)) for m in self.memories]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        if k <= 0:
+            return []
+        if query_embedding is None:
+            return [m for m, _ in scored[:k]]
+        embedded_count = sum(1 for m, _ in scored if m.embedding is not None)
+        if embedded_count < 2:
+            return [m for m, _ in scored[:k]]
+        return self._mmr_select(scored, k)
+
+    def _mmr_select(self, scored: list[tuple["Memory", float]], k: int) -> list["Memory"]:
+        """贪心 MMR：每一步都从剩下的候选里，挑"自身分数高、又跟已经选中的都不太像"的那条。
+        mmr_lambda 越接近 1 越只看分数（退化成纯 top-k）；越接近 0 越优先追求多样性。"""
+        pool = list(scored)
+        selected: list[Memory] = []
+        while pool and len(selected) < k:
+            best_idx, best_mmr = 0, float("-inf")
+            for i, (m, base_score) in enumerate(pool):
+                if selected and m.embedding is not None:
+                    sims = [_cosine(m.embedding, s.embedding) for s in selected if s.embedding is not None]
+                    penalty = max(sims) if sims else 0.0
+                else:
+                    penalty = 0.0
+                mmr_score = self.mmr_lambda * base_score - (1 - self.mmr_lambda) * penalty
+                if mmr_score > best_mmr:
+                    best_idx, best_mmr = i, mmr_score
+            selected.append(pool.pop(best_idx)[0])
+        return selected
 
     # ---- 调试 ----
     def dump(self, now: float, limit: int = 50) -> list[dict]:
