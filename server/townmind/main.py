@@ -81,7 +81,12 @@ async def recall(npc_id: str) -> dict:
 
     这是整个记忆系统里最值得看、却一直看不见的部分：光看 NPC 说了什么，看不出它
     凭什么想起这条而不是那条。recall_explained() 早就写好了，这里把它接出来。"""
-    return {"npc_id": npc_id, "recalled": app.state.agent.last_recall.get(npc_id, [])}
+    agent = app.state.agent
+    return {
+        "npc_id": npc_id,
+        "recalled": agent.last_recall.get(npc_id, []),
+        "query": agent.last_query.get(npc_id, {"nearby": [], "heard": [], "semantic": False}),
+    }
 
 
 @app.get("/flags")

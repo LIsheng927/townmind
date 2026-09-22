@@ -244,6 +244,8 @@ class MemoryStore:
             out.append(
                 {
                     "text": m.text,
+                    "kind": m.kind,
+                    "hop": m.hop,
                     "recency": round(recency, 3),
                     "importance": round(importance, 3),
                     "relevance": round(relevance, 3),

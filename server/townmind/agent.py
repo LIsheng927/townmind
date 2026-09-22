@@ -377,6 +377,10 @@ class Agent:
         # recall_explained() 早就写好了，但一直没有任何地方消费它——这里存一份，
         # 前端就能把"NPC 凭什么想起这条"直接画出来，而不是只能看到它说了什么。
         self.last_recall: dict[str, list[dict]] = {}
+        # 上面那次检索是拿什么去查的：附近有谁、听到了什么、有没有真的算语义向量。
+        # 没有这个，面板上"相关度全是 0"看起来像坏了——其实只是这一轮附近没人、也没
+        # 听到话，query 为空，相关度按规则退化成"认不认人"，而"人"是空集
+        self.last_query: dict[str, dict] = {}
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -566,6 +570,11 @@ class Agent:
         if self.use_memory:
             explained = self._mem(npc_id).recall_explained(involved, now, query_embedding=query_embedding)
             self.last_recall[npc_id] = explained
+            self.last_query[npc_id] = {
+                "nearby": [_name(o) for o, _ in nearby],
+                "heard": [f"{_name(e.speaker)}：{e.text}" for e in heard],
+                "semantic": query_embedding is not None,
+            }
             picked = {row["text"] for row in explained}
             recalled = [m for m in self._mem(npc_id).memories if m.text in picked]
             # recall_explained 已经排好序了，按它的顺序还原，别让上面这次筛选打乱名次

@@ -1930,3 +1930,16 @@ def test_flags_lists_every_default_false_constructor_flag():
 
     ctor_flags = {n for n, p in inspect.signature(Agent.__init__).parameters.items() if p.default is False}
     assert ctor_flags <= set(Agent(None).flags()), ctor_flags - set(Agent(None).flags())
+
+
+def test_last_query_records_what_the_recall_was_about():
+    """面板上要能解释"相关度为什么全是 0"：这一轮附近没人、没听到话，query 就是空的。"""
+    import asyncio
+
+    a = Agent(None)
+    a.positions["alice"] = (0.0, 0.0)
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert a.last_query["alice"] == {"nearby": [], "heard": [], "semantic": False}
+    a.positions["bob"] = (1.0, 0.0)
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert a.last_query["alice"]["nearby"] == ["Bob"]

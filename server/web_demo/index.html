@@ -6,7 +6,7 @@
 <style>
   :root { color-scheme: light; --ink: #2b2620; --muted: #7a7267; --line: #d9d2c4; --paper: #f6f2ea; --card: #fffdf9; --accent: #1f6f8b; --warn: #b3541e; }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; min-height: 100vh; display: grid; grid-template-columns: 560px minmax(520px, 1fr); grid-template-rows: auto auto; align-items: start; background: var(--paper); color: var(--ink); font-size: 13px; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; min-height: 100vh; display: grid; grid-template-columns: 560px minmax(520px, 1fr); grid-template-rows: auto auto; align-items: start; align-content: start; background: var(--paper); color: var(--ink); font-size: 13px; }
   header { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 16px; padding: 10px 16px 6px; border-bottom: 1px solid var(--line); }
   header h1 { font-size: 17px; margin: 0; }
   header .sub { color: var(--muted); }
@@ -42,6 +42,7 @@
   th { color: var(--muted); font-weight: normal; }
   .hop { display: inline-block; min-width: 18px; text-align: center; border-radius: 9px; color: #fff; font-size: 11px; padding: 0 4px; }
   .empty { color: var(--muted); font-style: italic; }
+  #recallQuery { margin: 2px 0 6px; font-size: 12px; }
   /* 召回 */
   .bar { display: inline-block; height: 8px; vertical-align: middle; border-radius: 2px; }
   .bar.rec { background: #5b8def; } .bar.imp { background: #e0a33a; } .bar.rel { background: #3fa26a; }
@@ -100,6 +101,7 @@
   <div class="card" id="recall">
     <h2><span class="t">召回解释</span> <span class="hint">它最近一次决策想起了什么、凭什么</span><select id="recallNpc"></select></h2>
     <div class="legend"><span><i style="background:#5b8def"></i>新近度</span><span><i style="background:#e0a33a"></i>重要度</span><span><i style="background:#3fa26a"></i>相关度</span></div>
+    <div id="recallQuery" class="empty"></div>
     <div id="recallBody"><span class="empty">还没有决策。</span></div>
   </div>
 
@@ -383,14 +385,23 @@ canvas.addEventListener("click", ev => {
   if (best) { recallNpc = best.id; document.getElementById("recallNpc").value = recallNpc; pollRecall(); }
 });
 async function pollRecall() {
-  try { const r = await getJSON("/recall/" + recallNpc); renderRecall(r.recalled); } catch (e) { /* ignore */ }
+  try { const r = await getJSON("/recall/" + recallNpc); renderQuery(r.query); renderRecall(r.recalled); } catch (e) { /* ignore */ }
+}
+function renderQuery(q) {
+  const el = document.getElementById("recallQuery");
+  if (!q) { el.textContent = ""; return; }
+  const parts = [];
+  parts.push(q.nearby && q.nearby.length ? "附近：" + q.nearby.join("、") : "附近没人");
+  parts.push(q.heard && q.heard.length ? "听到：" + q.heard.map(h => "「" + h + "」").join(" ") : "没听到话");
+  parts.push(q.semantic ? "语义检索：是" : "语义检索：否（没有情境可查，相关度退化成\"认不认人\"）");
+  el.textContent = "这次是拿什么去查的 — " + parts.join("；");
 }
 function renderRecall(list) {
   const el = document.getElementById("recallBody");
   if (!list || !list.length) { el.innerHTML = `<span class="empty">${esc(byId[recallNpc]?.name || recallNpc)} 还没有过一次带记忆的决策。</span>`; return; }
   const bar = (cls, v) => `<span class="bar ${cls}" style="width:${Math.round(Math.max(0, Math.min(1, v)) * 60)}px"></span>`;
   el.innerHTML = `<table><tr><th>记忆</th><th>新近</th><th>重要</th><th>相关</th><th>总分</th></tr>` +
-    list.map(m => `<tr><td class="memtext" title="${esc(m.text)}">${esc(m.text)}</td>
+    list.map(m => `<tr><td class="memtext" title="${esc(m.text)}">${m.hop ? `<span class="hop" style="background:${HOP_COLORS[Math.min(m.hop, HOP_COLORS.length - 1)]}">${m.hop}手</span> ` : ""}${m.kind && m.kind !== "event" ? `<small style="color:#7a7267">[${esc(m.kind)}]</small> ` : ""}${esc(m.text)}</td>
       <td>${bar("rec", m.recency)} ${m.recency.toFixed(2)}</td><td>${bar("imp", m.importance)} ${m.importance.toFixed(2)}</td>
       <td>${bar("rel", m.relevance)} ${m.relevance.toFixed(2)}</td><td><b>${m.total.toFixed(2)}</b></td></tr>`).join("") + `</table>`;
 }
