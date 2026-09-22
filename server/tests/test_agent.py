@@ -375,3 +375,14 @@ def test_player_talk_of_unknown_food_is_not_memorised():
     decide(a)
     assert not any("提拉米苏" in m["text"] for m in a.memory_dump("alice"))
     assert a.stats["memory_skipped_ungrounded"] == 1
+
+
+def test_positions_setdefault_stays_in_sync_with_spatial_index():
+    """踩过的坑：继承 dict 重写 __setitem__，dict.setdefault 不会经过这个重写（CPython 的
+    已知行为），导致像 agent.positions.setdefault("bob", ...) 这种写法能进 positions 字典，
+    却没同步进空间网格，_nearby() 就找不到人。这个测试锁住"不管用哪种方式改 positions，
+    _nearby() 都得看得见"这件事，防止以后又踩回这个坑。"""
+    a = Agent(None)
+    a.positions.setdefault("bob", (1.0, 1.0))
+    a.update_position("alice", [0.0, 0.0])
+    assert "bob" in dict(a._nearby("alice"))

@@ -10,7 +10,7 @@ import math
 import random
 import re
 import time
-from collections import defaultdict, deque
+from collections import UserDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
@@ -22,6 +22,32 @@ from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
 from .memory import Memory, MemoryStore, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
+from .spatial import SpatialGrid
+
+
+class _TrackedPositions(UserDict):
+    """跟 SpatialGrid 保持同步的位置字典。
+
+    坑在这儿：Agent 生产代码里只通过 update_position() 改 positions，但测试和 evals 脚本里
+    经常图省事直接 agent.positions["bob"] = (...)、甚至 agent.positions.setdefault(...) 这样改。
+    如果只是继承 dict 重写 __setitem__，setdefault 并不会走这个重写（CPython 的已知行为，
+    setdefault 在 C 层直接改内部哈希表，不经过子类的 __setitem__）。改成继承 UserDict 就没有
+    这个问题——UserDict 的 setdefault/update 等方法都是纯 Python 实现、内部真的会调
+    __setitem__，所以不管用哪种方式改 positions，SpatialGrid 都能同步更新，不会出现"查出来的
+    人是过时数据"这种不同步的情况。"""
+
+    def __init__(self, grid: SpatialGrid) -> None:
+        self._grid = grid
+        super().__init__()
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self._grid.update(key, value)
+
+    def __delitem__(self, key) -> None:
+        super().__delitem__(key)
+        self._grid.remove(key)
+
 
 log = logging.getLogger("townmind.agent")
 HALF = policy.WORLD_HALF_SIZE
@@ -115,7 +141,12 @@ class Agent:
         self._llm_slots = asyncio.Semaphore(max_concurrent_llm)
         self._in_flight = 0
         self.clock = clock  # 可注入，测试时用假时钟
-        self.positions: dict[str, tuple[float, float]] = {}
+        # 空间网格：查"附近有谁"用它，不用跟所有人逐个算距离（NPC 一多，逐个算距离的开销
+        # 是 O(n²)，这个是接近 O(n) 的）；cell_size 取跟 NEARBY_RADIUS 一样，查询时只用看
+        # 周围一圈相邻格子。positions 是个会自动跟它保持同步的字典，外部用起来和普通 dict
+        # 没有区别（包括直接赋值、setdefault 这些用法）。
+        self._spatial = SpatialGrid(cell_size=NEARBY_RADIUS)
+        self.positions: dict[str, tuple[float, float]] = _TrackedPositions(self._spatial)
         self.memory_dir = memory_dir  # 为 None 时记忆只存在内存里（测试用）
         self._memories: dict[str, MemoryStore] = {}
         self.events: deque[SpeechEvent] = deque(maxlen=50)
@@ -335,14 +366,11 @@ class Agent:
         return "ok"
 
     def _nearby(self, npc_id: str) -> list[tuple[str, float]]:
-        me = self.positions.get(npc_id)
-        if me is None:
+        """谁在附近：走空间网格查询，只看 npc_id 所在格子周围一圈，不跟全部 NPC 逐个算距离。
+        结果跟"逐个算距离"的写法完全一致，tests/test_spatial.py 里有专门验证这一点。"""
+        if npc_id not in self.positions:
             return []
-        return [
-            (o, math.dist(me, pos))
-            for o, pos in self.positions.items()
-            if o != npc_id and math.dist(me, pos) <= NEARBY_RADIUS
-        ]
+        return self._spatial.nearby(npc_id, NEARBY_RADIUS)
 
     def _heard_line(self, e: SpeechEvent) -> str:
         warn = "prompt" in self.safety_layers
