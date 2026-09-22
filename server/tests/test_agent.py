@@ -2,6 +2,7 @@ import asyncio
 
 from townmind import world
 from townmind.agent import (
+    CONVERSATION_IDLE_SECONDS,
     IMPORTANCE_HEARD,
     IMPORTANCE_LESSON,
     IMPORTANCE_META_REFLECTION,
@@ -1844,3 +1845,54 @@ def test_optional_flags_are_documented_in_env_example():
     documented = set(re.findall(r"^(TOWNMIND_[A-Z_]+)=", example, re.M))
     missing = sorted(env_names - documented - {"TOWNMIND_DATA_DIR"})  # 数据目录不是功能开关
     assert not missing, f"这些环境变量没写进 .env.example：{missing}"
+
+
+# ---------- 对话散场：没人说再见也要收尾 ----------
+def test_conversation_is_compressed_when_it_just_fizzles_out():
+    """真实运行里绝大多数对话不是"道别"结束的，而是人走光了、或者说满 3 句被 capped
+    打发去闲逛。实测 90 秒 10 个 NPC 255 条新记忆，end_conversation 一次都没出现——
+    只认正式道别的话，压缩和关系更新几乎永远不会发生。"""
+    clock = FakeClock()
+    calls = [ToolCall("say", {"text": f"第{i}句"}) for i in range(5)]
+    calls.append(ToolCall("summarize_conversation", {"summary": "跟Bob聊了会儿家常"}))
+    llm = ScriptedLLM(calls)
+    a = Agent(llm, clock=clock, compress_conversations=True)
+    for _ in range(5):
+        decide(a)
+        clock.t += 15
+    assert "alice" in a.conversation_start  # 对话还开着
+    a.positions["bob"] = (100.0, 100.0)  # Bob 走远了，没人再搭话
+    clock.t += CONVERSATION_IDLE_SECONDS + 1
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" not in a.conversation_start  # 收尾了
+    assert a.stats["conversations_ended_by_timeout"] == 1
+    assert a.stats["conversations_compressed"] == 1
+    assert [m.text for m in a._mem("alice").memories if m.kind == "conversation"] == ["跟Bob聊了会儿家常"]
+
+
+def test_conversation_not_finished_while_still_chatting():
+    """还在聊的时候不能提前收尾，不然会把一场对话切成好几段。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": f"第{i}句"}) for i in range(5)])
+    a = Agent(llm, clock=clock, compress_conversations=True)
+    for _ in range(5):
+        decide(a)
+        clock.t += 15  # 每轮都有互动，idle 计时一直被刷新
+    assert "alice" in a.conversation_start
+    assert a.stats.get("conversations_ended_by_timeout", 0) == 0
+
+
+def test_conversation_peers_accumulate_over_the_whole_conversation():
+    """参与者要一路累积：对话散掉的时候人早走光了，那时候现取 nearby 只会得到空集合，
+    一条记忆都圈不出来。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": f"第{i}句"}) for i in range(3)])
+    a = Agent(llm, clock=clock, compress_conversations=True)
+    decide(a)  # bob 在场
+    clock.t += 15
+    a.positions["carol"] = (1.0, 1.0)  # carol 也来了
+    decide(a)
+    clock.t += 15
+    a.positions["bob"] = (100.0, 100.0)  # bob 走了
+    decide(a)
+    assert a.conversation_peers["alice"] >= {"bob", "carol"}  # 两个都记着
