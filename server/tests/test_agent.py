@@ -1,7 +1,7 @@
 import asyncio
 
 from townmind import world
-from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_SAID, Agent, Task, _self_said_text
+from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_LESSON, IMPORTANCE_SAID, Agent, Task, _self_said_text
 from townmind.llm.base import ToolCall
 
 
@@ -580,6 +580,134 @@ def test_suspect_said_check_exception_degrades_gracefully():
     result = decide(a)  # 不该抛异常、不该整个决策失败
     assert result["name"] == "idle"
     assert "系统核对发现" not in llm.systems[1]
+
+
+# ---------- Chain-of-Verification 式：guard 拦下的回复先重试一次，而不是直接兜底 ----------
+class SwitchingGuardModel:
+    """跟 StubGuardModel 不同：只拦下特定几句话，其它一律放行——专门用来测
+    "被拦下之后重试一次，重试后说的新内容应该能通过"这条链路，固定 label 的
+    StubGuardModel 测不出"重试后内容变了、判断也该跟着变"这件事。"""
+
+    def __init__(self, blocked_texts, label="unsafe"):
+        self.blocked_texts = set(blocked_texts)
+        self.label = label
+        self.calls = []
+
+    def classify(self, npc_id, text):
+        self.calls.append((npc_id, text))
+        return self.label if text in self.blocked_texts else "ok"
+
+
+def test_verify_and_revise_off_by_default_does_not_retry():
+    guard = SwitchingGuardModel({"你好呀"})
+    llm = RecordingLLM([ToolCall("say", {"text": "你好呀"})])  # 只给一次的量：真重试了会 pop 空列表报错
+    a = Agent(llm, guard_model=guard)  # verify_and_revise 默认关
+    r = decide(a)
+    assert is_bt_greeting(r)
+    assert len(llm.systems) == 1
+    assert a.stats.get("guard_revise_attempts", 0) == 0
+
+
+def test_verify_and_revise_retries_once_and_uses_revised_reply():
+    guard = SwitchingGuardModel({"第一次回复"})
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "第一次回复"}),
+        ToolCall("say", {"text": "修改后的回复"}),
+    ])
+    a = Agent(llm, guard_model=guard, verify_and_revise=True)
+    r = decide(a)
+    assert r == {"name": "say", "text": "修改后的回复"}
+    assert a.stats["guard_revise_attempts"] == 1
+    assert len(llm.systems) == 2
+    assert "第一次回复" in llm.systems[1]  # 重试时把被拦下的具体内容带回提示词，而不是凭空重说
+
+
+def test_verify_and_revise_falls_back_after_retry_also_blocked():
+    guard = StubGuardModel("unsafe")  # 两次都拦
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "第一次回复"}),
+        ToolCall("say", {"text": "还是不行的回复"}),
+    ])
+    a = Agent(llm, guard_model=guard, verify_and_revise=True)
+    r = decide(a)
+    assert is_bt_greeting(r)  # 重试之后仍不通过，才真的退回行为树
+    assert a.stats["guard_revise_attempts"] == 1  # 只重试一次，不会没完没了
+    assert len(llm.systems) == 2  # 总共只问了两次大模型，成本可控
+
+
+# ---------- Reflexion 式：guard 分类器实锤一次编造之后，多存一条"教训"记忆 ----------
+class ContentAwareGuardModel:
+    """比 StubGuardModel 更贴近真实场景的假实现：指定的几句话第一次被查时放行（模拟
+    "当时侥幸蒙混过关，顺利说出口、写进了记忆"），之后再查到同一句话才判 fabricated
+    （模拟"后来被翻出来了"）；不在名单里的话（包括真正说出口的纠正语）一律 ok。
+    分两阶段是必须的：如果一上来就把这句话判成 fabricated，它连第一轮的输出检查都
+    过不去，根本不会被写成"你说了「...」"这条记忆，第二轮也就没有东西可核对；如果
+    自始至终都判 fabricated，纠正语本身（如果内容上跟被标记的那句有重叠）也可能被
+    连累拦下，就测不出"教训有没有被写下来"这件事——这两种写法都在早前的测试里踩过坑。"""
+
+    def __init__(self, fabricated_texts):
+        self.fabricated_texts = set(fabricated_texts)
+        self._seen = set()
+        self.calls = []
+
+    def classify(self, npc_id, text):
+        self.calls.append((npc_id, text))
+        if text not in self.fabricated_texts:
+            return "ok"
+        if text in self._seen:
+            return "fabricated"
+        self._seen.add(text)
+        return "ok"
+
+
+def test_reflexion_lesson_written_after_successful_correction():
+    clock = FakeClock()
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}),
+        ToolCall("say", {"text": "这个我好像记错了，其实没有这回事"}),
+    ])
+    guard = ContentAwareGuardModel({"魔法学院要请你去教魔法面包"})
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard, reflexion_lessons=True)
+    decide(a)
+    clock.t += 7
+    decide(a)
+    lessons = [m for m in a._mem("alice").memories if m.importance == IMPORTANCE_LESSON]
+    assert len(lessons) == 1
+    assert "魔法学院要请你去教魔法面包" in lessons[0].text
+    assert a.stats["reflexion_lessons"] == 1
+
+
+def test_reflexion_lesson_off_by_default():
+    clock = FakeClock()
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}),
+        ToolCall("say", {"text": "这个我好像记错了，其实没有这回事"}),
+    ])
+    guard = ContentAwareGuardModel({"魔法学院要请你去教魔法面包"})
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard)  # reflexion_lessons 默认关
+    decide(a)
+    clock.t += 7
+    decide(a)
+    assert not any(m.importance == IMPORTANCE_LESSON for m in a._mem("alice").memories)
+    assert a.stats.get("reflexion_lessons", 0) == 0
+
+
+def test_reflexion_lesson_not_written_when_correction_reply_itself_blocked():
+    """纠正语本身也没能通过 guard（比如还是绕不开提到那件事），source 就不是 "llm"
+    而是 "fallback"——这时候不该假装"学到教训了"，没有真的纠正成功就不该写这条记忆。"""
+    clock = FakeClock()
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}),
+        ToolCall("say", {"text": "还在纠结魔法学院的事"}),
+    ])
+    guard = StubGuardModel("ok")
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard, reflexion_lessons=True)
+    decide(a)
+    guard.label = "fabricated"  # 连第二轮自己的输出检查也一起拦下，模拟"纠正没成功"
+    clock.t += 7
+    decide(a)
+    assert not any(m.importance == IMPORTANCE_LESSON for m in a._mem("alice").memories)
+    assert a.stats.get("reflexion_lessons", 0) == 0
 
 
 # ---------- 伙伴任务：接受委托、搬东西 ----------
