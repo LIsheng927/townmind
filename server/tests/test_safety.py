@@ -85,3 +85,33 @@ def test_denial_may_echo_what_was_heard_but_playing_along_is_blocked():
     assert safety.check_npc_reply("提拉米苏？我们没有这个，没听说过。", heard).ok
     assert not safety.check_npc_reply("提拉米苏很好吃，来一块吧！", heard).ok
     assert not safety.check_npc_reply("我们没有蛋糕，但有提拉米苏。", "你们有蛋糕吗？").ok  # 否认了蛋糕，却编出提拉米苏
+
+
+# ---------- 传闻措辞：说话人自己表示"这不是我亲历的" ----------
+def test_hearsay_markers_catches_common_phrasings():
+    for text in (
+        "昨儿后半夜，井边听说有人说见到过奇怪的影子。",  # 真实运行里踩到的那句
+        "据说镇长下个月要来。",
+        "有人说集市要涨价了。",
+        "好像是 Bob 干的吧。",
+        "我也不知道是不是真的，反正传开了。",
+        "最近都在传这事。",
+    ):
+        assert safety.hearsay_markers(text), text
+
+
+def test_denial_is_not_mistaken_for_spreading_a_rumor():
+    """「我没听说过这事」是**否认**，不是在传谣——两者都含"听说"两个字。
+    不把它们分开的话，NPC 正确地否认一件不存在的事，反而会被记成"它在传谣"，正好抓反。"""
+    for text in ("我没听说过这事。", "这个我还真没听过，说说看。", "没听说过面包节。"):
+        assert safety.hearsay_markers(text) == [], text
+
+
+def test_plain_statements_are_not_hearsay():
+    for text in ("法棍刚出炉，要不要尝尝？", "嗯，我在忙整理铁器。", "面粉涨了三成，真是无奈。"):
+        assert safety.hearsay_markers(text) == [], text
+
+
+def test_hearsay_markers_tolerates_empty():
+    assert safety.hearsay_markers("") == []
+    assert safety.hearsay_markers(None) == []
