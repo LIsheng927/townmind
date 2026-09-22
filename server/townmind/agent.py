@@ -342,9 +342,10 @@ class Agent:
         use_gossip: bool = False,  # 主动把自己知道的事讲给别人听（八卦）。不额外花 LLM 调用，
         # 只是在提示词里多给一条候选；跟 use_relationships 分开是为了能单独做消融——
         # 两个都开时，信不过的人不会听到你知道的事
-        assertive_sharing: bool = False,  # 分享提示的强度。关：软提示（"可以顺口提一句，也可以不说"），
-        # 实验台实测真实模型只有约 8% 的轮次真把事说出口；开：够重要的事（>= SHARE_ASSERTIVE_IMPORTANCE）
-        # 明确要求这句话里提一下。默认关，留着做 A/B——两种提示下的"说出口率"是个值得报告的数字
+        assertive_sharing: bool = True,  # 分享提示的强度。开（默认）：够重要的事（>= SHARE_ASSERTIVE_IMPORTANCE）
+        # 明确要求这句话里提一下；关：软提示（"可以顺口提一句，也可以不说"）。默认开是数据定的：清空记忆、
+        # 用软提示重跑，Alice 拿着一条重要度 9 的悄悄话、8 次机会全在聊肉桂卷，0 次说出口，消息死在源头
+        # ——人设写着"三两句就绕回面包"，软提示根本拗不过人设。关掉留作 A/B 对照
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
