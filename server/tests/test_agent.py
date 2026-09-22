@@ -1151,11 +1151,20 @@ def test_reflection_skipped_when_no_llm_configured():
 # ---------- 分层反思：反思素材换成 score() 排序，而不是纯按时间 ----------
 def test_reflection_material_uses_score_not_pure_recency():
     """_maybe_reflect() 选材料现在走 store.recall()（新近度+重要度打分），不是单纯按时间倒序
-    取最近 REFLECTION_RECENT_K 条。这里造一个"纯按时间选材会漏掉、但按分数选材能捞回来"的
-    场景：25 条很新但完全不重要的琐事（重要度 1），加 1 条很久以前但重要度拉满的事
-    （重要度 10）。纯按时间选"最近 20 条"，这条古老但重要的事必然被挤出去（比所有 25 条
-    琐事都旧）；按新近度+重要度打分选，它的高重要度能把名次拉回前 20，材料里应该看得到它——
-    这是这次改动想要的效果，不是巧合。"""
+    取最近 REFLECTION_RECENT_K 条。
+
+    这里的数字是特意算过的，不是随手写的：recency 和 importance 两项分量各自封顶都是 1.0
+    （component_scores 里 importance/10，重要度拉满是 10），所以一条彻底衰减到 0 新近度的
+    记忆，哪怕重要度拉满，总分也顶多是 1.0——很容易被"刚发生、哪怕完全不重要"的记忆
+    （新近度接近 1.0 + 重要度 0.1 ≈ 1.1）反超，纯拿"很久很久以前"当测试场景反而验证不出
+    新旧公式的差异（两种选材方式都会漏掉它）。
+
+    真正能体现"按分数选材比纯按时间选材更聪明"的场景，是这条重要记忆没有老到新近度归零，
+    但也不是最近的——用 half_life=120s 算：405 秒前，recency≈0.5^(405/120)≈0.096，
+    加满分重要度 1.0，总分≈1.096；而 25 条"20~500 秒前、重要度 1"的琐事里最新的一条
+    （20 秒前）总分也只有≈0.991，比它低。这样一来：纯按时间选"最近 20 条"，前面已经有
+    20 条比它新的琐事（外加对话本身产生的记忆），它必然被挤出去；但按分数选材，它的分数
+    比全部 25 条琐事都高，稳稳留在材料里。"""
     llm = ScriptedLLM(
         [
             ToolCall("say", {"text": "你好呀"}),
@@ -1165,15 +1174,17 @@ def test_reflection_material_uses_score_not_pure_recency():
     a = Agent(llm, use_reflection=True)
     store = a._mem("alice")
     now = a.clock()
-    for i in range(1, 26):  # 25 条很新、很不重要的琐事——纯按时间选材的话，这些会占满"最近 20 条"的名额
-        store.add(f"琐事{i}", importance=1, now=now - i)
-    store.add("很久以前发生过一件很重要的事", importance=10, now=now - 100000)  # 纯按时间选材会漏掉这条
+    for i in range(1, 26):  # 25 条 20~500 秒前、完全不重要的琐事
+        store.add(f"琐事{i}", importance=1, now=now - 20 * i)
+    # 405 秒前、重要度拉满：前面已经有 20 条琐事（外加对话记忆）比它新，纯按时间选"最近 20
+    # 条"必然漏掉它；但它的分数比全部 25 条琐事都高，按分数选材应该能留住它
+    store.add("不久前发生过一件很重要的事", importance=10, now=now - 405)
     store.importance_since_reflection = 200.0  # 提前攒够阈值
     a.hear_player("你好", [1.0, 0.0])
     asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
     assert len(llm.users) >= 2, "应该触发了反思，消耗了第二次 LLM 调用"
     reflect_prompt = llm.users[1]
-    assert "很久以前发生过一件很重要的事" in reflect_prompt
+    assert "不久前发生过一件很重要的事" in reflect_prompt
 
 
 # ---------- 分层反思：对一级反思本身再反思一层 ----------
