@@ -13,7 +13,7 @@ namespace TownMind.World
     {
         public static InputField Create()
         {
-            if (Object.FindObjectOfType<EventSystem>() == null)
+            if (Object.FindFirstObjectByType<EventSystem>() == null)
             {
                 var es = new GameObject("EventSystem");
                 es.AddComponent<EventSystem>();
@@ -109,7 +109,7 @@ namespace TownMind.World
 
             button.onClick.AddListener(() =>
             {
-                var pc = Object.FindObjectOfType<PlayerController>();
+                var pc = Object.FindFirstObjectByType<PlayerController>();
                 if (pc != null) pc.SubmitText();
             });
 
