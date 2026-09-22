@@ -335,6 +335,25 @@ def test_prompt_says_lore_beats_memory_only_with_lore():
     assert "以设定为准" not in llm2.last_system
 
 
+def test_prompt_extends_lore_skepticism_to_own_past_statements():
+    """幻觉累积的缺口：以前只教 NPC 不要轻信"别人说的话"，没教它也别轻信"自己以前说过的话"。
+    一句编造的话如果侥幸躲过说出口之前的检查、被记进了自己的记忆，下次回忆起来会被当成既定
+    事实，在这个基础上继续编，越滚越大——这条提醒把同一个"以设定为准"的原则也扩展到自己的
+    旧发言上，帮它在回忆自己说过的话时也留一个心眼。"""
+    llm = FakeLLM(ToolCall("idle", {}))
+    decide(Agent(llm, use_lore=True))
+    assert "你自己以前说过的话" in llm.last_system
+
+
+def test_distrust_own_memory_toggle_reverts_to_old_wording():
+    """给评测脚本用的消融开关：关掉 distrust_own_memory 应该拿到修复前的旧版提示词，
+    这样才能跑"加了这条提醒 vs 没加"的对照实验，量化这条提醒到底有没有用、有多大用。"""
+    llm = FakeLLM(ToolCall("idle", {}))
+    decide(Agent(llm, use_lore=True, distrust_own_memory=False))
+    assert "你自己以前说过的话" not in llm.last_system
+    assert "别人说过的话未必属实" in llm.last_system
+
+
 # ---------- 多层安全 ----------
 def test_player_injection_is_flagged_warned_and_not_memorised_verbatim():
     llm = FakeLLM(ToolCall("say", {"text": "我只是个面包师，不懂你说的。"}))
