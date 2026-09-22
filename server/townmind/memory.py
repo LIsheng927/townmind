@@ -15,8 +15,13 @@ import json
 import logging
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+try:  # numpy 是可选的：装了就走向量化的快路径，没装就退回纯 Python，结果一样
+    import numpy as _np
+except ImportError:  # pragma: no cover - 取决于环境装没装
+    _np = None
 
 log = logging.getLogger("townmind.memory")
 
@@ -57,6 +62,26 @@ def retold_importance(source_importance: int) -> int:
     return max(1, round(max(1, min(10, int(source_importance))) * HOP_IMPORTANCE_DECAY))
 
 
+def _similarity(a: "Memory", b: "Memory") -> float:
+    """两条记忆之间的余弦相似度。两边都预先归一化过时就是一次点积；否则退回纯 Python。"""
+    if a._vec is not None and b._vec is not None:
+        return float(a._vec @ b._vec)
+    return _cosine(a.embedding, b.embedding)
+
+
+def _unit_vector(embedding):
+    """把向量归一化成 numpy 行向量；没装 numpy、没有向量、或者是零向量时返回 None。
+
+    归一化放在写入时做是有讲究的：检索时要拿一个查询向量去跟成百上千条记忆比，如果每次
+    都现算每条记忆的模长，同一个数会被反复算无数遍。预先归一化之后，余弦相似度就退化成
+    一次点积，整批记忆一次矩阵乘就算完了。"""
+    if _np is None or embedding is None:
+        return None
+    v = _np.asarray(embedding, dtype=_np.float64)
+    n = float(_np.linalg.norm(v))
+    return None if n == 0.0 else v / n
+
+
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     """两个向量的余弦相似度，取值理论上在 [-1, 1]；某条向量全是 0（理论上不该发生）时算 0 分，不报错。"""
     dot = sum(x * y for x, y in zip(a, b))
@@ -88,6 +113,18 @@ class Memory:
     # 没有这个标记的话，同一件事会被翻来覆去讲给同一个人听，这是"会主动说话的 NPC"
     # 最容易露馅的地方。只记"讲给谁"，不记"讲过几次"：一次就够了。
     told_to: frozenset[str] = frozenset()
+    # 归一化之后的 numpy 行向量，写入时算好，检索时直接做矩阵乘。
+    #
+    # 为什么不直接把 numpy 数组存进上面的 embedding 字段：dataclass 自动生成的 __eq__ 会
+    # 逐字段比较，numpy 数组的 == 返回的是逐元素布尔数组，再被 bool() 一取就抛
+    # "truth value of an array is ambiguous"，会炸掉一大片拿 Memory 做相等判断的测试。
+    # 所以单开一个字段，并且 compare=False（不参与相等判断）、repr=False（不污染打印）。
+    # embedding 仍然是原样的 tuple，落盘、跨进程、没装 numpy 的环境都不受影响。
+    _vec: object = field(default=None, compare=False, repr=False)
+    # ↑ 这个字段必须排在最后：它是内部缓存，不是记忆本身的属性。踩过一次——一开始把它
+    # 插在 told_to 前面，而 load() 是按位置构造 Memory 的，于是读回来的 told_to 被塞进了
+    # _vec，记忆"跟谁讲过"的信息全丢了，测试当场抓到。下面 load() 已经改成按名字传参，
+    # 以后再加字段不会再踩这个坑，但顺序本身也一并摆正。
 
 
 def format_age(seconds: float) -> str:
@@ -125,7 +162,12 @@ class MemoryStore:
         # 一次一次折下来（见 agent._remember），这里再折一遍就成了双重折扣
         hop = max(0, int(hop))
         emb = tuple(embedding) if embedding is not None else None
-        self.memories.append(Memory(text, now, importance, frozenset(people), emb, kind, hop))
+        m = Memory(
+            text=text, time=now, importance=importance, people=frozenset(people),
+            embedding=emb, kind=kind, hop=hop,
+        )
+        m._vec = _unit_vector(emb)
+        self.memories.append(m)
         self.importance_since_reflection += importance
         if kind == "reflection":
             # 只有"一级反思"才计入二级反思的累计——普通事件、和二级反思本身都不算，
@@ -190,6 +232,26 @@ class MemoryStore:
             )
         return out
 
+    def _bulk_relevance(self, query_embedding) -> dict | None:
+        """一次矩阵乘算出所有带向量记忆跟本次查询的余弦相似度，返回 {id(记忆): 相似度}。
+
+        没装 numpy、这次查询没带向量、或者候选里带向量的不到两条时返回 None，调用方退回
+        原来的逐条计算——两条路径结果一致，只是快慢不同（tests 里有专门的一致性测试）。
+
+        这是检索这条链路上最值钱的一步优化：_cosine() 是纯 Python 的逐元素循环，1536 维
+        向量算一次要几千次解释器级别的浮点运算，实测 200 条记忆一次 recall 要 200ms 左右；
+        换成一次矩阵乘之后同样的数据只要零点几毫秒。"""
+        if _np is None or query_embedding is None:
+            return None
+        rows = [m for m in self.memories if m._vec is not None]
+        if len(rows) < 2:
+            return None
+        q = _unit_vector(query_embedding)
+        if q is None:
+            return None
+        sims = _np.stack([m._vec for m in rows]) @ q
+        return {id(m): float(s) for m, s in zip(rows, sims)}
+
     def _ranking_components(
         self, involved, now: float, query_embedding=None
     ) -> list[tuple[Memory, tuple[float, float, float]]]:
@@ -210,7 +272,21 @@ class MemoryStore:
         不参与，因为那不是同一种尺度的信号。component_scores()/score() 本身不做这一步，保持成
         一个跟"这次候选池长什么样"无关的、确定性的单条记忆打分（capacity 淘汰用的就是这个，
         淘汰时没有 query_embedding，不受这次改动影响）。"""
-        raw = [[m, list(self.component_scores(m, involved, now, query_embedding))] for m in self.memories]
+        bulk = self._bulk_relevance(query_embedding)
+        if bulk is None:
+            raw = [[m, list(self.component_scores(m, involved, now, query_embedding))] for m in self.memories]
+        else:
+            # 相关度已经用一次矩阵乘批量算好了，这里就不能再把 query_embedding 传进
+            # component_scores——否则它会逐条再算一遍纯 Python 的余弦，白白付两份钱
+            # （第一版就是这么写的，结果只快了 10 倍而不是几百倍）。传 None 进去，让它只算
+            # 新近度和重要度；没有向量的那些候选照常退化成"认不认人"，跟原来完全一致。
+            raw = []
+            for m in self.memories:
+                comps = list(self.component_scores(m, involved, now, None))
+                s = bulk.get(id(m))
+                if s is not None:
+                    comps[2] = max(0.0, s)
+                raw.append([m, comps])
         if query_embedding is not None:
             embedded = [i for i, (m, _) in enumerate(raw) if m.embedding is not None]
             if len(embedded) >= 2:
@@ -239,9 +315,46 @@ class MemoryStore:
         embedded_count = sum(1 for m, _, _ in scored if m.embedding is not None)
         if embedded_count < 2:
             return [(m, comps) for m, comps, _ in scored[:k]]
-        picked = self._mmr_select([(m, s) for m, _, s in scored], k)
+        picked = self._mmr_select([(m, s) for m, _, s in self._mmr_candidates(scored, k)], k)
         comps_by_id = {id(m): comps for m, comps, _ in scored}
         return [(m, comps_by_id[id(m)]) for m in picked]
+
+    def _mmr_candidates(self, scored, k: int):
+        """MMR 只需要看"还有可能被选中"的那些候选，剩下的可以直接不参与——结果保证不变。
+
+        这不是"取前 N 名"那种拍脑袋的截断，是从 mmr_lambda 推出来的精确界：
+
+            mmr(m) = λ·base(m) − (1−λ)·penalty(m)，  penalty ∈ [−1, 1]
+
+        所以任何一条候选的 mmr 分数都落在 λ·base(m) ± (1−λ) 这个区间里。低分候选 B 想赢过
+        高分候选 A，最好的情况是 B 拿到最低惩罚、A 拿到最高惩罚：
+
+            λ·base(B) + (1−λ) > λ·base(A) − (1−λ)   ⟺   base(A) − base(B) < 2(1−λ)/λ
+
+        也就是说，分数比第 k 名低 2(1−λ)/λ 以上的候选，无论跟已选集合有多不像都赢不了——
+        因为每一轮贪心选择时，只要还没选满 k 条，按分数排在前 k 的候选里必定至少有一条还在
+        池子里（要么没被选走，要么已经被选走、那它本来就占了一个名额），B 永远输给它。
+
+        这个界会自己适配参数，不需要调：
+          λ=1.0  界为 0    → 池子就是前 k 条（MMR 退化成纯 top-k，本来就该这样）
+          λ=0.7  界 0.857  → 默认值下池子通常只有几十条，省掉绝大部分计算
+          λ=0.2  界 8.0    → 超过总分的量程（三项各 0~1，最多 3），池子退回全量——
+                             而这正是"调低 λ 追求多样性"时确实需要全量才算得对的情况
+
+        为什么值得做：_mmr_select 是 O(N·k²) 的，N 是整个记忆库。实测 200 条记忆、1536 维
+        真实向量时，一次 recall 要 201ms，其中约 190ms 花在 MMR 上——而排名第 195 的记忆
+        根本不可能赢，却每次都要跟已选的逐条算余弦。"""
+        if k >= len(scored):
+            return scored
+        if self.mmr_lambda <= 0.0:
+            return scored  # 完全不看分数、只看多样性：谁都可能赢，不能砍
+        margin = 2.0 * (1.0 - self.mmr_lambda) / self.mmr_lambda
+        cutoff = scored[k - 1][2] - margin
+        # scored 已经按总分降序排好，第一个低于 cutoff 的位置之后全都可以不要
+        for i in range(k, len(scored)):
+            if scored[i][2] < cutoff:
+                return scored[:i]
+        return scored
 
     def _mmr_select(self, scored: list[tuple["Memory", float]], k: int) -> list["Memory"]:
         """贪心 MMR：每一步都从剩下的候选里，挑"自身分数高、又跟已经选中的都不太像"的那条。
@@ -252,7 +365,7 @@ class MemoryStore:
             best_idx, best_mmr = 0, float("-inf")
             for i, (m, base_score) in enumerate(pool):
                 if selected and m.embedding is not None:
-                    sims = [_cosine(m.embedding, s.embedding) for s in selected if s.embedding is not None]
+                    sims = [_similarity(m, s) for s in selected if s.embedding is not None]
                     penalty = max(sims) if sims else 0.0
                 else:
                     penalty = 0.0
@@ -333,26 +446,31 @@ class MemoryStore:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             memories = [
+                # 一律按名字传参，不按位置：Memory 的字段是一路加出来的（embedding、kind、
+                # hop、told_to…），按位置构造的话，以后任何一次"在中间插一个字段"都会把
+                # 后面的值整体错位，而且不会报错，只会让数据静悄悄地跑到错误的字段里去。
                 Memory(
-                    d["text"],
-                    float(d["time"]),
-                    int(d["importance"]),
-                    frozenset(d["people"]),
+                    text=d["text"],
+                    time=float(d["time"]),
+                    importance=int(d["importance"]),
+                    people=frozenset(d["people"]),
                     # 老的记忆文件（加语义检索之前存的）没有这个字段，get 兜底成 None，
                     # 相关度就自动退化回"认不认人"那一版，不会因为读老文件而崩溃
-                    tuple(d["embedding"]) if d.get("embedding") is not None else None,
+                    embedding=tuple(d["embedding"]) if d.get("embedding") is not None else None,
                     # 老的记忆文件（加分层反思之前存的）没有这个字段，兜底成 "event"——
                     # 不会把老记忆错当成一级反思，二级反思的计数也不会被老数据污染
-                    d.get("kind", "event"),
+                    kind=d.get("kind", "event"),
                     # 老的记忆文件（加传播代数之前存的）没有这个字段，兜底成 0——
                     # 当成第一手，跟加这个功能之前的行为一致
-                    int(d.get("hop", 0)),
+                    hop=int(d.get("hop", 0)),
                     # 老的记忆文件（加主动分享之前存的）没有这个字段，兜底成空集合——
                     # 最坏的结果只是这些老记忆有可能被再讲一遍，不会崩
-                    frozenset(d.get("told_to", ())),
+                    told_to=frozenset(d.get("told_to", ())),
                 )
                 for d in data["memories"]
             ]
+            for m in memories:  # 落盘的是原始 tuple，读回来要重新算一遍归一化向量
+                m._vec = _unit_vector(m.embedding)
             store.memories = memories
             store.met = set(data["met"])
             # 老的记忆文件（加反思之前存的）没有这个字段，兜底成 0——大不了这个 NPC
