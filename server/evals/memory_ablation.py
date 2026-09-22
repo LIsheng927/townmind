@@ -198,6 +198,8 @@ async def eval_mmr_diversity(embedder) -> dict:
         "关掉（mmr_lambda=1.0，等价于纯相关性排序）": 1.0,
         "默认（mmr_lambda=0.7，保守，偏向相关性）": 0.7,
         "调低多样性权重（mmr_lambda=0.4）": 0.4,
+        "调得更低（mmr_lambda=0.2）": 0.2,
+        "几乎只看多样性（mmr_lambda=0.1）": 0.1,
     }
     out = {}
     for label, lam in variants.items():
