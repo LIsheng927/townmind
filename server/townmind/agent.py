@@ -234,6 +234,11 @@ RELATIONSHIP_RECENT_K = 6  # 判断关系变化时，回顾跟这个人有关的
 # 一场对话攒到这么多条流水账才值得压缩。太少的话压缩本身不划算——多花一次 LLM 调用，
 # 只省下两三条记忆，还把原话弄没了
 COMPRESS_MIN_LINES = 4
+# 多久没再搭话就算这场对话散了。真实运行里 NPC 极少主动说再见——90 秒、10 个 NPC、
+# 255 条新记忆，end_conversation 一次都没出现；而"30 秒内说满 3 句"触发的 capped 会
+# 直接让它走开去闲逛，压根不经过 end_conversation。只认"正式道别"的话，对话结束时
+# 该做的事（压缩、更新关系）几乎永远不会发生。
+CONVERSATION_IDLE_SECONDS = 20.0
 IMPORTANCE_CONVERSATION = 6  # 压缩出来的那条对话摘要的重要度：跟"别人对你说的话"同一档
 # 主动分享的信任门槛：低于这个值就不跟对方说自己知道的事。取 -1.5 是 social._level 里
 # "不太信得过"那一档的分界——也就是说，只有真的信不过的人才会被闭嘴，泛泛之交照说不误
@@ -334,6 +339,11 @@ class Agent:
         # 这一场对话是从什么时候开始的——压缩时用它圈出属于这场对话的那些记忆。
         # 不在字典里 = 现在没在对话中
         self.conversation_start: dict[str, float] = {}
+        # 这场对话里都有谁。要一路累积，不能等结束时现取 nearby——对话散掉的时候
+        # 人早就走光了，现取只会得到空集合，圈不出任何记忆
+        self.conversation_peers: dict[str, set] = {}
+        # 最后一次真的在对话里的时刻，用来判断"这场是不是已经散了"
+        self.conversation_last: dict[str, float] = {}
         # 关系册：每个 NPC 一本，记"我对谁是什么印象"。跟记忆一样按 npc_id 分开、懒加载，
         # 落盘也跟记忆走同一个目录（见 _relation_path）
         self._relations: dict[str, RelationshipBook] = {}
@@ -483,6 +493,10 @@ class Agent:
                 share_hint = self._pick_share_hint(npc_id, nearby, now)
                 # 这是这场对话的第一轮：记下起点，结束时按它圈出要压缩的那批记忆
                 self.conversation_start.setdefault(npc_id, now)
+                self.conversation_last[npc_id] = now
+                self.conversation_peers.setdefault(npc_id, set()).update(
+                    {o for o, _ in nearby} | {e.speaker for e in heard}
+                )
                 action, source = await self._ask_llm(
                     npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said, share_hint=share_hint
                 )
@@ -561,13 +575,17 @@ class Agent:
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
             if ended:
-                others = {o for o, _ in nearby} | {e.speaker for e in heard}
-                # 要在 _remember 之后：这样"道别"这件事本身也在关系判断的素材里，
-                # 模型看到的是完整的一场对话，而不是缺了最后一句的版本
-                await self._maybe_update_relationship(npc_id, now, others)
-                # 压缩要放在关系判断之后：关系判断要看这场对话的原话，压完就只剩摘要了
-                await self._maybe_compress_conversation(npc_id, now, others)
-                self.conversation_start.pop(npc_id, None)
+                # 正式道别。放在 _remember 之后：这样"道别"这件事本身也进了记忆，
+                # 关系判断看到的是完整的一场对话，而不是缺了最后一句的版本
+                await self._finish_conversation(npc_id, now)
+            elif npc_id in self.conversation_start and now - self.conversation_last.get(
+                npc_id, now
+            ) >= CONVERSATION_IDLE_SECONDS:
+                # 没人说再见，但这场对话事实上已经散了（人走光了、或者说满了被 capped
+                # 打发去闲逛）。这是真实运行里绝大多数对话的结束方式，必须一起认，
+                # 否则压缩和更新关系几乎永远不会发生
+                self.stats["conversations_ended_by_timeout"] += 1
+                await self._finish_conversation(npc_id, now)
             if self.use_reflection and self.llm is not None:
                 await self._maybe_reflect(npc_id, now)
                 await self._maybe_meta_reflect(npc_id, now)
@@ -865,7 +883,23 @@ class Agent:
             self.stats["relationship_updates"] += 1
         self._save_relations(npc_id)
 
-    def _conversation_lines(self, npc_id: str, now: float, others: set) -> list[Memory]:
+    async def _finish_conversation(self, npc_id: str, now: float) -> None:
+        """一场对话收尾时该做的事，不管是正式道别还是自然散场，走的都是这里。
+
+        顺序有讲究：关系判断要看这场对话的原话，所以必须排在压缩前面——压完就只剩
+        一条摘要了，再判断"这场聊得愉不愉快"就没有依据了。
+
+        起点和参与者都是先取出来、再作为参数往下传，不存成实例属性：多个 NPC 是并发
+        决策的（evals/sim.py 用 asyncio.gather 同时调 decide），共用实例属性会互相覆盖。"""
+        others = self.conversation_peers.pop(npc_id, set())
+        start = self.conversation_start.pop(npc_id, None)
+        self.conversation_last.pop(npc_id, None)
+        if not others or start is None:
+            return
+        await self._maybe_update_relationship(npc_id, now, others)
+        await self._maybe_compress_conversation(npc_id, now, others, start)
+
+    def _conversation_lines(self, npc_id: str, start: float, others: set) -> list[Memory]:
         """圈出"这场对话里的流水账"——只有这些该被压掉。
 
         刻意留下不压的几类，每一类都有理由：
@@ -875,9 +909,6 @@ class Agent:
             会直接断掉；
           - kind 不是 event 的（反思、二级反思）：那本来就是压缩过一次的产物，不能再压。
         """
-        start = self.conversation_start.get(npc_id)
-        if start is None:
-            return []
         return [
             m
             for m in self._mem(npc_id).memories
@@ -888,7 +919,9 @@ class Agent:
             and (m.people & others)
         ]
 
-    async def _maybe_compress_conversation(self, npc_id: str, now: float, others: set) -> None:
+    async def _maybe_compress_conversation(
+        self, npc_id: str, now: float, others: set, start: float
+    ) -> None:
         """一场对话结束时，把这场的逐句流水账换成一条摘要。
 
         为什么值得做：实测活跃对话时每个 NPC 每分钟产生 26~41 条记忆，其中约八成长这样——
@@ -900,7 +933,7 @@ class Agent:
         调用失败就把这场对话的记录整个弄丢。"""
         if not self.compress_conversations or self.llm is None:
             return
-        lines = self._conversation_lines(npc_id, now, others)
+        lines = self._conversation_lines(npc_id, start, others)
         if len(lines) < COMPRESS_MIN_LINES:
             return  # 太短了，压缩本身不划算
         persona = PERSONAS.get(npc_id, DEFAULT_PERSONA)
