@@ -12,7 +12,20 @@ import asyncio
 import math
 from dataclasses import dataclass
 
-START_POSITIONS = {"alice": (-3.0, 0.0), "bob": (0.0, 3.0), "carol": (3.0, -2.0)}  # 和 Unity 里一致
+# 和 Unity 里一致（unity/.../TownWorld.cs 的 Spawn 调用）。出生点故意不摆在各自的工作
+# 地点上，而是散在镇子中间——这样开局就有人碰得到面，不用等他们各自走回岗位。
+START_POSITIONS = {
+    "alice": (-3.0, 0.0),
+    "bob": (0.0, 3.0),
+    "carol": (3.0, -2.0),
+    "dan": (5.0, 0.0),
+    "elsa": (-5.0, 0.0),
+    "finn": (-1.5, 4.5),
+    "greta": (2.0, 2.0),
+    "iris": (-4.0, 2.0),
+    "jonas": (1.0, -2.0),
+    "milo": (-1.0, -1.0),
+}
 SPEED = 2.5
 
 
