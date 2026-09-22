@@ -229,6 +229,7 @@ class Agent:
         embedder: Any | None = None,  # 可选：语义检索用的 embedding 客户端（townmind.llm.embeddings.OpenAIEmbedder）
         dynamic_importance: bool = False,  # 让大模型给每条新记忆打重要度分，换掉写死的常量；多一次 LLM 调用，默认关
         use_reflection: bool = False,  # 累计重要度到一定量就反思一次、提炼出更高层的记忆；多一次 LLM 调用，默认关
+        expressive_dialogue: bool = True,  # 更丰富的人设 + 弱化"复述+反问"套路的新提示词；关掉是旧版，仅用于评测对比
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -246,6 +247,7 @@ class Agent:
         self.embedder = embedder
         self.dynamic_importance = dynamic_importance
         self.use_reflection = use_reflection
+        self.expressive_dialogue = expressive_dialogue
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -784,8 +786,10 @@ class Agent:
     def _build_prompt(self, npc_id, heard, nearby, recalled: list[Memory], now: float) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         task = self.tasks.get(npc_id)
+        habits = p.get("speech_habits") if self.expressive_dialogue else None
         parts = [
             f"你是游戏小镇里的 NPC「{p['name']}」。{p['persona']}",
+            ("说话习惯：" + "；".join(habits) + "。") if habits else "",
             f"你的工作地点是{p['home']}。" if p.get("home") else "",
             f"小镇里有这些地点：{'、'.join(PLACE_NAMES)}。想去某处时用 go_to。",
             "每次你必须调用一个工具来决定下一步行动。",
@@ -805,7 +809,13 @@ class Agent:
             if "prompt" in self.safety_layers
             else "",
             f"只有附近（{NEARBY_RADIUS} 米内）有其他人时才说话，台词不超过 30 个字，要符合你的性格。",
-            "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。",
+            (
+                "如果刚有人对你说话，用 say 回应；但回应不代表要把对方的话换个说法重复一遍、"
+                "再补一句「是吗/真的吗」这种套话，也不代表每次都要反问——有想法就直接说，没什么好问的就别硬找话问，"
+                "性格越沉默寡言就可以说得越短，甚至只回一两个字。"
+                if self.expressive_dialogue
+                else "如果刚有人对你说话，应当用 say 回应，形成一来一回的对话。"
+            ),
             "话题聊完了、或者已经聊了三四句，就用 end_conversation 道别并走开去忙自己的事，不要一直聊下去。",
             (
                 f"如果玩家让你帮忙搬东西：只能接真实存在的物品（{'、'.join(ITEM_NAMES)}）和地点（{'、'.join(PLACE_NAMES)}）用 "
