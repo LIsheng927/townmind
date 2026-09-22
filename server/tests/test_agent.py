@@ -1383,3 +1383,101 @@ def test_corrupt_relationship_file_falls_back_to_empty(tmp_path):
     (tmp_path / "alice.social.json").write_text("{坏掉的 json", encoding="utf-8")
     a = Agent(None, use_relationships=True, memory_dir=tmp_path)
     assert a._rel("alice").known() == []  # 读不出来就从空的开始，不该抛异常
+
+
+# ---------- 主动分享（八卦）：把自己知道的事讲给别人听 ----------
+# 这些断言统一盯提示词里那句固定措辞（"多半还不知道的事"），而不是光看记忆文本在不在
+# 提示词里——高重要度的记忆本来就会被 recall() 捞进"你想起了"那一段，光看文本会把
+# "想起来了"和"打算主动说出去"这两件不同的事混为一谈。
+HINT = "多半还不知道的事：「集市的米价涨了三成」"
+
+
+def test_gossip_hint_offers_an_important_unshared_memory():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你听说了吗"})])
+    a = Agent(llm, use_gossip=True)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=a.clock())
+    decide(a)
+    assert HINT in llm.users[0]
+
+
+def test_gossip_off_by_default():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"})])
+    a = Agent(llm)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=a.clock())
+    decide(a)
+    assert "多半还不知道的事" not in llm.users[0]
+
+
+def test_trivial_memories_are_not_worth_bringing_up():
+    """鸡毛蒜皮的事不值得特意提起，不然 NPC 见谁都絮叨。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"})])
+    a = Agent(llm, use_gossip=True)
+    a._mem("alice").add("今天天气不错", importance=3, now=a.clock())
+    decide(a)
+    assert "多半还不知道的事" not in llm.users[0]
+
+
+def test_gossip_does_not_tell_someone_their_own_news():
+    """不要把对方自己参与过的事当成新鲜事讲回给ta听——这是最容易让人出戏的一种。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"})])
+    a = Agent(llm, use_gossip=True)
+    a._mem("alice").add("Bob 说他要搬走了", importance=9, now=a.clock(), people={"bob"})
+    decide(a)
+    assert "多半还不知道的事" not in llm.users[0]
+
+
+def test_gossip_not_repeated_to_the_same_person():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "一"}), ToolCall("say", {"text": "二"})])
+    a = Agent(llm, use_gossip=True, clock=clock)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    decide(a)
+    assert HINT in llm.users[0]
+    clock.t += 10  # 越过说话冷却，再决策一次
+    decide(a)
+    assert "多半还不知道的事" not in llm.users[1]  # 同一件事不再翻出来跟同一个人讲第二遍
+    assert a.stats["shares_told"] == 1
+
+
+def test_gossip_told_to_one_person_is_still_news_to_another():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "一"}), ToolCall("say", {"text": "二"})])
+    a = Agent(llm, use_gossip=True, clock=clock)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    decide(a)  # 讲给 bob 听
+    clock.t += 10
+    a.positions["bob"] = (100.0, 100.0)  # bob 走远了
+    a.positions["carol"] = (1.0, 1.0)  # carol 过来了
+    decide(a)
+    assert HINT in llm.users[1]  # 对 carol 来说这还是新鲜事
+
+
+def test_gossip_is_withheld_from_someone_you_distrust():
+    """关系这一层真正改变行为的地方：信不过的人，知道的事宁可不说。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"})])
+    a = Agent(llm, use_gossip=True, use_relationships=True)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=a.clock())
+    a._rel("alice").apply("bob", -3, -3, "他上次骗了我", a.clock())
+    decide(a)
+    assert "多半还不知道的事" not in llm.users[0]
+    assert a.stats["share_blocked_by_distrust"] == 1
+
+
+def test_gossip_still_flows_to_a_neutral_acquaintance():
+    """不熟不代表不聊天——只有真信不过的人才会被闭嘴，泛泛之交照说不误。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好"})])
+    a = Agent(llm, use_gossip=True, use_relationships=True)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=a.clock())
+    decide(a)
+    assert HINT in llm.users[0]
+    assert a.stats.get("share_blocked_by_distrust", 0) == 0
+
+
+def test_gossip_hint_not_marked_told_when_npc_stays_silent():
+    """这一轮没说话（比如走开了），就不该记成"跟ta讲过了"——不然这条消息会平白消失。"""
+    llm = ScriptedLLM([ToolCall("idle", {"seconds": 2})])
+    a = Agent(llm, use_gossip=True)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=a.clock())
+    decide(a)
+    assert a.stats.get("shares_told", 0) == 0
+    assert a._mem("alice").shareable("bob", a.clock(), k=1) != []
