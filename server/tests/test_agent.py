@@ -1678,3 +1678,124 @@ def test_no_hearsay_instruction_when_nothing_is_hearsay():
     clock.t += 10
     decide(a, "bob")
     assert "听来的传闻" not in llm.users[2]
+
+
+# ---------- 对话压缩：把一场对话的流水账换成一条摘要 ----------
+def _chatty_agent(clock, *, compress=True, turns=6):
+    """造一场有来有回的对话，最后一句是道别（触发压缩）。"""
+    calls = [ToolCall("say", {"text": f"第{i}句"}) for i in range(turns)]
+    calls.append(ToolCall("end_conversation", {"farewell": "我先走了"}))
+    calls.append(ToolCall("summarize_conversation", {"summary": "跟Bob聊了会儿家常"}))
+    llm = ScriptedLLM(calls)
+    return Agent(llm, clock=clock, compress_conversations=compress), llm
+
+
+def _run_conversation(a, clock, turns=6):
+    for _ in range(turns + 1):  # 最后一轮是道别
+        decide(a)
+        # 每轮推进 15 秒：不只是越过 6 秒的说话冷却，还要让 30 秒窗口里的发言数退回
+        # 上限以下。用 10 秒的话第 4 轮就会撞上"30 秒内最多 3 句"变成 capped，
+        # 那一轮走规则不问大模型，ScriptedLLM 的队列就错位了
+        clock.t += 15
+
+
+def test_conversation_is_compressed_into_one_memory():
+    clock = FakeClock()
+    a, _ = _chatty_agent(clock)
+    _run_conversation(a, clock)
+    store = a._mem("alice")
+    chatter = [m for m in store.memories if m.kind == "event" and m.importance <= IMPORTANCE_HEARD]
+    summaries = [m for m in store.memories if m.kind == "conversation"]
+    assert len(summaries) == 1
+    assert summaries[0].text == "跟Bob聊了会儿家常"
+    assert chatter == []  # 流水账已经换掉了
+    assert a.stats["conversations_compressed"] == 1
+    assert a.stats["lines_compressed"] >= 4
+
+
+def test_compression_is_off_by_default():
+    clock = FakeClock()
+    calls = [ToolCall("say", {"text": f"第{i}句"}) for i in range(6)]
+    calls.append(ToolCall("end_conversation", {"farewell": "我先走了"}))
+    llm = ScriptedLLM(calls)
+    a = Agent(llm, clock=clock)
+    _run_conversation(a, clock)
+    assert llm.calls == []  # 队列正好用完，没有多要一次摘要调用
+    assert a.stats.get("conversations_compressed", 0) == 0
+    assert [m for m in a._mem("alice").memories if m.kind == "conversation"] == []
+
+
+def test_identity_facts_survive_compression():
+    """"你第一次见到 Bob"（重要度 8）是身份事实，不是闲聊——压掉的话
+    NPC 就再也不知道自己认没认识过这个人了。"""
+    clock = FakeClock()
+    a, _ = _chatty_agent(clock)
+    _run_conversation(a, clock)
+    texts = [m.text for m in a._mem("alice").memories]
+    assert any("第一次见到" in t for t in texts)
+
+
+def test_hearsay_survives_compression():
+    """听来的消息压掉的话，传播代数和出处就都没了，八卦传播那条链会直接断掉。"""
+    clock = FakeClock()
+    a, _ = _chatty_agent(clock)
+    store = a._mem("alice")
+    store.add("Bob对你说：「听说井边有影子」", importance=5, now=clock(), people={"bob"}, hop=1)
+    _run_conversation(a, clock)
+    kept = [m for m in store.memories if m.hop >= 1]
+    assert len(kept) == 1  # 传闻还在
+
+
+def test_reflections_survive_compression():
+    clock = FakeClock()
+    a, _ = _chatty_agent(clock)
+    store = a._mem("alice")
+    store.add("你的一条感想", importance=6, now=clock(), people={"bob"}, kind="reflection")
+    _run_conversation(a, clock)
+    assert [m for m in store.memories if m.kind == "reflection"] != []
+
+
+def test_short_conversations_are_not_worth_compressing():
+    """两三句话的照面压缩不划算：多花一次 LLM 调用，只省下两三条记忆，还把原话弄没了。"""
+    clock = FakeClock()
+    calls = [ToolCall("say", {"text": "你好"}), ToolCall("end_conversation", {"farewell": "我先走了"})]
+    llm = ScriptedLLM(calls)
+    a = Agent(llm, clock=clock, compress_conversations=True)
+    _run_conversation(a, clock, turns=1)
+    assert llm.calls == []  # 没有要摘要
+    assert a.stats.get("conversations_compressed", 0) == 0
+
+
+def test_failed_summary_keeps_the_raw_lines():
+    """宁可留着一堆流水账，也不能因为一次调用失败就把这场对话的记录整个弄丢。"""
+
+    class Boom:
+        calls = 0
+
+        async def choose_tool(self, system, user, tools):
+            self.calls += 1
+            if self.calls <= 6:
+                return ToolCall("say", {"text": f"第{self.calls}句"})
+            if self.calls == 7:
+                return ToolCall("end_conversation", {"farewell": "我先走了"})
+            raise RuntimeError("down")  # 摘要这次调用炸了
+
+    clock = FakeClock()
+    a = Agent(Boom(), clock=clock, compress_conversations=True)
+    _run_conversation(a, clock)
+    store = a._mem("alice")
+    assert [m for m in store.memories if m.kind == "conversation"] == []
+    assert [m for m in store.memories if m.kind == "event"] != []  # 原始记录还在
+    assert a.stats.get("conversations_compressed", 0) == 0
+
+
+def test_summary_is_not_compressed_again_next_conversation():
+    """摘要本身 kind 是 conversation，不该被下一场对话再压一次——
+    否则聊得越久，历史被反复摘要，最后只剩一句没有信息量的空话。"""
+    clock = FakeClock()
+    a, _ = _chatty_agent(clock)
+    _run_conversation(a, clock)
+    summary_before = [m.text for m in a._mem("alice").memories if m.kind == "conversation"]
+    lines = a._conversation_lines("alice", clock(), {"bob"})
+    assert all(m.kind == "event" for m in lines)
+    assert summary_before == [m.text for m in a._mem("alice").memories if m.kind == "conversation"]

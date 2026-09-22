@@ -185,6 +185,13 @@ class Reflect(BaseModel):
     )
 
 
+class SummarizeConversation(BaseModel):
+    """把一整场对话压成一句话。限制在 40 个字是故意的：压缩的意义就在于它比原始的
+    七八条逐句记录短得多，允许写长了就失去了意义。"""
+
+    summary: Annotated[str, Field(min_length=1, max_length=60, description="一句话概括这场对话，不超过 30 个字")]
+
+
 class UpdateRelationship(BaseModel):
     """一场对话结束后，对方在我心里的变化。delta 限制在 [-3, 3] 这个小范围里是故意的：
     一次对话本来就不该把关系彻底翻转，而且 social.RelationshipBook 那边还会再做一次
@@ -205,6 +212,11 @@ REFLECT_TOOL = {
     "description": "从最近的记忆里提炼出一两条更高层次的感想或规律",
     "parameters": Reflect.model_json_schema(),
 }
+SUMMARIZE_CONVERSATION_TOOL = {
+    "name": "summarize_conversation",
+    "description": "把刚结束的这场对话压缩成一句话",
+    "parameters": SummarizeConversation.model_json_schema(),
+}
 UPDATE_RELATIONSHIP_TOOL = {
     "name": "update_relationship",
     "description": "根据刚结束的这场对话，更新你对对方的好感和信任",
@@ -219,6 +231,10 @@ IMPORTANCE_META_REFLECTION = 10  # 二级反思是"感想的感想"，是整个�
 META_REFLECTION_RECENT_K = 8  # 二级反思时回顾最近这么多条一级反思
 LORE_TOP_K = 3  # "镇上的事"语义检索之后，最多留几条塞进提示词
 RELATIONSHIP_RECENT_K = 6  # 判断关系变化时，回顾跟这个人有关的最近几条记忆
+# 一场对话攒到这么多条流水账才值得压缩。太少的话压缩本身不划算——多花一次 LLM 调用，
+# 只省下两三条记忆，还把原话弄没了
+COMPRESS_MIN_LINES = 4
+IMPORTANCE_CONVERSATION = 6  # 压缩出来的那条对话摘要的重要度：跟"别人对你说的话"同一档
 # 主动分享的信任门槛：低于这个值就不跟对方说自己知道的事。取 -1.5 是 social._level 里
 # "不太信得过"那一档的分界——也就是说，只有真的信不过的人才会被闭嘴，泛泛之交照说不误
 # （现实里也是这样：不熟不代表不聊天，只有心里有疙瘩才会留一手）。
@@ -285,6 +301,9 @@ class Agent:
         # "教训"记忆，让这次纠正靠语义检索在未来别的话题里也可能被想起，不只在当轮起效；默认关，等真实数据验证效果
         use_relationships: bool = False,  # 给每个人单独记一份好感/信任，影响语气和愿不愿意把事告诉他；
         # 每场对话结束后多一次 LLM 调用（跟反思、动态重要度一样是可选的增强），默认关，方便做消融对比
+        compress_conversations: bool = False,  # 对话结束时把这场的逐句流水账压成一条摘要。
+        # 每场对话多一次 LLM 调用（相对这场对话本身花掉的十几次，约 5~10%），换来的是同样的
+        # 容量能装下大约十倍长的历史。失败时保持原样，不丢数据。默认关，方便做消融对比
         use_gossip: bool = False,  # 主动把自己知道的事讲给别人听（八卦）。不额外花 LLM 调用，
         # 只是在提示词里多给一条候选；跟 use_relationships 分开是为了能单独做消融——
         # 两个都开时，信不过的人不会听到你知道的事
@@ -311,6 +330,10 @@ class Agent:
         self.reflexion_lessons = reflexion_lessons
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
+        self.compress_conversations = compress_conversations
+        # 这一场对话是从什么时候开始的——压缩时用它圈出属于这场对话的那些记忆。
+        # 不在字典里 = 现在没在对话中
+        self.conversation_start: dict[str, float] = {}
         # 关系册：每个 NPC 一本，记"我对谁是什么印象"。跟记忆一样按 npc_id 分开、懒加载，
         # 落盘也跟记忆走同一个目录（见 _relation_path）
         self._relations: dict[str, RelationshipBook] = {}
@@ -458,6 +481,8 @@ class Agent:
                 # 不在纯规则决策的那几种情况上白跑一次 guard_model 推理
                 suspect_said = await self._flag_suspect_said_memories(npc_id, recalled)
                 share_hint = self._pick_share_hint(npc_id, nearby, now)
+                # 这是这场对话的第一轮：记下起点，结束时按它圈出要压缩的那批记忆
+                self.conversation_start.setdefault(npc_id, now)
                 action, source = await self._ask_llm(
                     npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said, share_hint=share_hint
                 )
@@ -536,11 +561,13 @@ class Agent:
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
             if ended:
+                others = {o for o, _ in nearby} | {e.speaker for e in heard}
                 # 要在 _remember 之后：这样"道别"这件事本身也在关系判断的素材里，
                 # 模型看到的是完整的一场对话，而不是缺了最后一句的版本
-                await self._maybe_update_relationship(
-                    npc_id, now, {o for o, _ in nearby} | {e.speaker for e in heard}
-                )
+                await self._maybe_update_relationship(npc_id, now, others)
+                # 压缩要放在关系判断之后：关系判断要看这场对话的原话，压完就只剩摘要了
+                await self._maybe_compress_conversation(npc_id, now, others)
+                self.conversation_start.pop(npc_id, None)
             if self.use_reflection and self.llm is not None:
                 await self._maybe_reflect(npc_id, now)
                 await self._maybe_meta_reflect(npc_id, now)
@@ -837,6 +864,81 @@ class Agent:
             book.apply(other, upd.affinity_delta, upd.trust_delta, upd.reason, now)
             self.stats["relationship_updates"] += 1
         self._save_relations(npc_id)
+
+    def _conversation_lines(self, npc_id: str, now: float, others: set) -> list[Memory]:
+        """圈出"这场对话里的流水账"——只有这些该被压掉。
+
+        刻意留下不压的几类，每一类都有理由：
+          - 重要度高于 IMPORTANCE_CONVERSATION 的（比如"你第一次见到 Bob"，重要度 8）：
+            那是身份事实，不是闲聊，压掉就再也不知道认没认识过这个人；
+          - hop>=1 的（听来的消息）：压掉的话传播代数和"是谁说的"都没了，八卦传播那条链
+            会直接断掉；
+          - kind 不是 event 的（反思、二级反思）：那本来就是压缩过一次的产物，不能再压。
+        """
+        start = self.conversation_start.get(npc_id)
+        if start is None:
+            return []
+        return [
+            m
+            for m in self._mem(npc_id).memories
+            if m.time >= start
+            and m.kind == "event"
+            and m.hop == 0
+            and m.importance <= IMPORTANCE_CONVERSATION
+            and (m.people & others)
+        ]
+
+    async def _maybe_compress_conversation(self, npc_id: str, now: float, others: set) -> None:
+        """一场对话结束时，把这场的逐句流水账换成一条摘要。
+
+        为什么值得做：实测活跃对话时每个 NPC 每分钟产生 26~41 条记忆，其中约八成长这样——
+        「你对 Bob 说了「嗯」」「Bob 对你说：「嗯，我在忙整理铁器」」。这不是记忆，是聊天
+        记录；真人聊完一场不会记住每句话，只会记住"我跟 Bob 聊了面粉涨价，他没什么反应"。
+        一场 4~6 句的对话压成一条，同样的容量能装下大约十倍长的历史。
+
+        失败（超时、报错、格式不对）一律保持原样——宁可留着一堆流水账，也不能因为一次
+        调用失败就把这场对话的记录整个弄丢。"""
+        if not self.compress_conversations or self.llm is None:
+            return
+        lines = self._conversation_lines(npc_id, now, others)
+        if len(lines) < COMPRESS_MIN_LINES:
+            return  # 太短了，压缩本身不划算
+        persona = PERSONAS.get(npc_id, DEFAULT_PERSONA)
+        system = (
+            f"你是游戏小镇里的 NPC「{persona['name']}」，刚跟"
+            f"{'、'.join(_name(o) for o in sorted(others))}聊完一场。"
+            "把这场对话概括成一句话，就像人过后回想起来会怎么说——记住聊了什么、对方是什么"
+            "反应就够了，不要逐句复述。不超过 30 个字。"
+        )
+        user = "\n".join(f"- {m.text}" for m in sorted(lines, key=lambda m: m.time))
+        call = await self._call_llm_tool(npc_id, system, user, SUMMARIZE_CONVERSATION_TOOL, "compress_calls")
+        if call is None:
+            return
+        try:
+            summary = SummarizeConversation(**call.arguments).summary
+        except Exception as e:
+            log.warning("[%s] 对话摘要格式不对（%s: %s），这场先不压", npc_id, type(e).__name__, e)
+            return
+        store = self._mem(npc_id)
+        embedding = (await self._embed_texts([summary]))[0]
+        drop = {id(m) for m in lines}
+        store.memories = [m for m in store.memories if id(m) not in drop]
+        store.add(
+            summary,
+            IMPORTANCE_CONVERSATION,
+            now,
+            people=set(others),
+            embedding=embedding,
+            kind="conversation",
+        )
+        self.stats["conversations_compressed"] += 1
+        self.stats["lines_compressed"] += len(lines)
+        path = self._memory_path(npc_id)
+        if path is not None:
+            try:
+                store.save(path)
+            except OSError as e:
+                log.warning("[%s] 压缩后存盘失败：%s", npc_id, e)
 
     async def _remember(self, npc_id, now, heard, nearby, action, ended) -> None:
         """把这一轮发生的事写进记忆，并给每条打上重要度。"""
