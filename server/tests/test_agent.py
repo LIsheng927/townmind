@@ -1575,3 +1575,100 @@ def test_hop_is_zero_when_gossip_is_off():
     heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
     assert heard[0].hop == 0
     assert a.stats.get("heard_hop_1", 0) == 0
+
+
+# ---------- 传闻识别：把对方自己的措辞当成信号 ----------
+def test_hedged_speech_is_recorded_as_hearsay_not_fact():
+    """真实运行里踩到的那条：守夜人说「井边听说有人说见到过奇怪的影子」——设定里没这回事，
+    是模型现编的，而且出口检查/ungrounded_items/invented_mentions 三道都拦不住（都是
+    "物品形状""地点形状"的规则，这是个编造的**事件**）。但模型自己把信号给出来了——
+    它说的就是"听说有人说"。听到的人应该按传闻记，而不是按亲历事实记。"""
+    clock = FakeClock()
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "昨儿后半夜，井边听说有人说见到过奇怪的影子"}),
+            ToolCall("say", {"text": "是吗"}),
+        ]
+    )
+    a = Agent(llm, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert len(heard) == 1
+    assert heard[0].hop == 1  # 按传闻记，不是 hop=0 的亲历事实
+    assert a.stats["heard_marked_as_hearsay"] == 1
+
+
+def test_plain_speech_is_still_recorded_as_first_hand():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "法棍刚出炉，要不要尝尝"}), ToolCall("say", {"text": "嗯"})])
+    a = Agent(llm, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert heard[0].hop == 0
+    assert a.stats.get("heard_marked_as_hearsay", 0) == 0
+
+
+def test_denial_is_not_recorded_as_hearsay():
+    """NPC 正确地否认一件不存在的事，不该被当成"它在传谣"。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "面包节？我没听说过这事"}), ToolCall("say", {"text": "嗯"})])
+    a = Agent(llm, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert heard[0].hop == 0
+    assert a.stats.get("heard_marked_as_hearsay", 0) == 0
+
+
+def test_hearsay_detection_can_be_ablated_with_the_memory_layer():
+    """跟其他几层安全机制一样可以单独关掉，方便做消融对比。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "听说井边有奇怪的影子"}), ToolCall("say", {"text": "是吗"})])
+    a = Agent(llm, clock=clock, safety_layers=frozenset({"input", "prompt", "output"}))
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert heard[0].hop == 0
+    assert a.stats.get("heard_marked_as_hearsay", 0) == 0
+
+
+def test_prompt_tells_npc_how_to_handle_hearsay():
+    """三条具体指令，对应真实运行里观察到的三种失败：去掉"听说"当成事实说、
+    替传闻背书、被追问出处时含糊其辞。"""
+    clock = FakeClock()
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "听说井边有奇怪的影子"}),
+            ToolCall("say", {"text": "是吗"}),
+            ToolCall("say", {"text": "嗯"}),
+        ]
+    )
+    a = Agent(llm, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    clock.t += 10
+    decide(a, "bob")
+    prompt = llm.users[2]
+    assert "听来的传闻" in prompt
+    assert "不要替它背书" in prompt
+    assert "如实说是谁讲的" in prompt
+
+
+def test_no_hearsay_instruction_when_nothing_is_hearsay():
+    """一条传闻都没有时不该白占提示词的地方。"""
+    clock = FakeClock()
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "法棍刚出炉"}),
+            ToolCall("say", {"text": "嗯"}),
+            ToolCall("say", {"text": "好"}),
+        ]
+    )
+    a = Agent(llm, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    clock.t += 10
+    decide(a, "bob")
+    assert "听来的传闻" not in llm.users[2]
