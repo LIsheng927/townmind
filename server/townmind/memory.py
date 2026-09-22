@@ -45,6 +45,18 @@ SHARE_MIN_IMPORTANCE = 6
 HOP_IMPORTANCE_DECAY = 0.8
 
 
+def retold_importance(source_importance: int) -> int:
+    """一条消息被转述一次之后，在听者心里还剩几分重要。
+
+    衰减是"每转述一次打一次折"的递推（i -> round(i * 0.8)），不是按代数一次性指数打折。
+    两者看起来等价，其实不是：听者记的是"转述者当时觉得这事有多重要"再打一折，而转述者
+    自己那个数也是这么一路折下来的，递推才对得上。按代数指数打折的话，如果听者又同时
+    继承了转述者已经打过折的值，就会折两遍。
+
+    至少留 1 分：再怎么传得远，它毕竟还是件"我知道的事"，不该被压成 0 直接消失。"""
+    return max(1, round(max(1, min(10, int(source_importance))) * HOP_IMPORTANCE_DECAY))
+
+
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     """两个向量的余弦相似度，取值理论上在 [-1, 1]；某条向量全是 0（理论上不该发生）时算 0 分，不报错。"""
     dot = sum(x * y for x, y in zip(a, b))
@@ -109,12 +121,9 @@ class MemoryStore:
         self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event", hop: int = 0
     ) -> None:
         importance = max(1, min(10, int(importance)))
+        # hop 在这里只是"这是第几手"的标记，不参与打分：打折由写入方按 retold_importance()
+        # 一次一次折下来（见 agent._remember），这里再折一遍就成了双重折扣
         hop = max(0, int(hop))
-        if hop:
-            # 二手消息本来就没那么当真——打折放在这里而不是调用方，是为了让"不管谁写进来的
-            # 转述，都自动比第一手轻"这件事只有一个地方说了算。至少留 1 分：再怎么传得远，
-            # 它毕竟还是件"我知道的事"，不该被压成 0 直接消失
-            importance = max(1, round(importance * HOP_IMPORTANCE_DECAY**hop))
         emb = tuple(embedding) if embedding is not None else None
         self.memories.append(Memory(text, now, importance, frozenset(people), emb, kind, hop))
         self.importance_since_reflection += importance

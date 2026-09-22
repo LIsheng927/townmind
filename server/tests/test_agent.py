@@ -1521,8 +1521,23 @@ def test_second_hand_memory_is_less_important_than_first_hand():
     decide(a, "alice")
     decide(a, "bob")
     second_hand = [m for m in a._mem("bob").memories if "对你说" in m.text][0]
-    assert second_hand.importance < IMPORTANCE_HEARD  # 二手消息打过折了
+    assert second_hand.importance < 9  # 比转述者手上那条轻——二手消息打过折了
+    assert second_hand.importance >= IMPORTANCE_HEARD  # 但比随口一句闲聊重：是人家特意来告诉你的
     assert a.stats["heard_hop_1"] == 1
+
+
+def test_important_news_is_still_worth_passing_on_after_one_retelling():
+    """这条是 evals/gossip_propagation.py 量出来的那个问题的回归测试。
+
+    原先听到的话一律按 IMPORTANCE_HEARD 拍平，再打一折就掉到分享门槛以下，结果是
+    不管多轰动的消息都只能传一手，传播机制基本等于没有。改成"继承转述者的判断、
+    以 IMPORTANCE_HEARD 为下限、再折一手"之后，够分量的消息才传得下去。"""
+    clock = FakeClock()
+    a, _ = _rumor_agent(clock, ["听说米价涨了三成", "是吗"])
+    decide(a, "alice")
+    decide(a, "bob")
+    # bob 手上这条二手消息，对还没听说过的第三个人来说仍然值得一提
+    assert a._mem("bob").shareable("carol", clock(), k=1) != []
 
 
 def test_second_hand_memory_is_flagged_as_hearsay_in_the_prompt():
