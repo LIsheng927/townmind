@@ -1549,7 +1549,9 @@ def test_second_hand_memory_is_flagged_as_hearsay_in_the_prompt():
     decide(a, "bob")
     clock.t += 10  # 越过说话冷却，让 bob 再决策一次
     decide(a, "bob")
-    assert "辗转听来的传闻" in llm.users[2]
+    prompt = llm.users[2]
+    assert "听来的传闻" in prompt  # 回忆那一行后面的标记
+    assert "不要替它背书" in prompt  # 以及配套的那条集中指令
 
 
 def test_first_hand_memories_are_not_flagged_as_hearsay():
@@ -1564,10 +1566,14 @@ def test_first_hand_memories_are_not_flagged_as_hearsay():
 
 
 def test_hop_is_zero_when_gossip_is_off():
-    """没开 use_gossip 时不存在"转述"这回事，所有听到的话都是第一手，
-    行为跟加这个功能之前完全一致。"""
+    """没开 use_gossip 时不存在"转述"这回事，听到的话是第一手。
+
+    台词特意不带"听说"：hop 有两个来源——转述（本条测的）和说话人自己的传闻措辞
+    （hearsay_markers，见 test_hedged_speech_is_recorded_as_hearsay_not_fact）。
+    后者是防幻觉的，跟 use_gossip 开不开无关，两套机制要分开测，一条台词同时触发
+    两个就说不清是哪个在起作用了。"""
     clock = FakeClock()
-    llm = ScriptedLLM([ToolCall("say", {"text": "听说米价涨了三成"}), ToolCall("say", {"text": "是吗"})])
+    llm = ScriptedLLM([ToolCall("say", {"text": "米价涨了三成"}), ToolCall("say", {"text": "是吗"})])
     a = Agent(llm, clock=clock)
     a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
     decide(a, "alice")
