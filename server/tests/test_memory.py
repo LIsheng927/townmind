@@ -309,3 +309,125 @@ def test_old_memory_file_without_new_fields_still_loads(tmp_path):
     assert len(loaded.memories) == 1
     assert loaded.memories[0].hop == 0
     assert loaded.memories[0].told_to == frozenset()
+
+
+# ---------- 检索性能：向量化快路径必须和纯 Python 结果一致 ----------
+import random  # noqa: E402
+
+from townmind import memory as memory_module  # noqa: E402
+
+
+def _vector_store(seed: int, n: int, dim: int = 64, **kw):
+    rng = random.Random(seed)
+    s = MemoryStore(capacity=n + 10, **kw)
+    for i in range(n):
+        s.add(f"记忆{i}", rng.randint(1, 10), NOW - rng.random() * 5000,
+              {"bob"}, embedding=tuple(rng.random() * 2 - 1 for _ in range(dim)))
+    for i in range(n // 5):  # 掺几条没有向量的，走"认不认人"那条退化路径
+        s.add(f"没向量{i}", rng.randint(1, 10), NOW - rng.random() * 5000, {"bob"})
+    return s
+
+
+def test_numpy_fast_path_matches_pure_python(monkeypatch):
+    """装了 numpy 走矩阵乘、没装退回逐条算——两条路径必须选出同一批记忆，
+    否则"优化"就变成了偷偷改变行为。"""
+    rng = random.Random(0)
+    for seed in range(8):
+        q = tuple(rng.random() * 2 - 1 for _ in range(64))
+        fast = [m.text for m in _vector_store(seed, 40).recall({"bob"}, NOW, k=5, query_embedding=q)]
+        monkeypatch.setattr(memory_module, "_np", None)  # 假装没装 numpy
+        slow = [m.text for m in _vector_store(seed, 40).recall({"bob"}, NOW, k=5, query_embedding=q)]
+        monkeypatch.undo()
+        assert fast == slow, f"seed={seed}"
+
+
+def test_fallback_also_matches_across_mmr_lambdas(monkeypatch):
+    q = tuple(random.Random(99).random() * 2 - 1 for _ in range(64))
+    for lam in (1.0, 0.7, 0.4, 0.2, 0.0):
+        fast = [m.text for m in _vector_store(3, 40, mmr_lambda=lam).recall({"bob"}, NOW, k=5, query_embedding=q)]
+        monkeypatch.setattr(memory_module, "_np", None)
+        slow = [m.text for m in _vector_store(3, 40, mmr_lambda=lam).recall({"bob"}, NOW, k=5, query_embedding=q)]
+        monkeypatch.undo()
+        assert fast == slow, f"mmr_lambda={lam}"
+
+
+def test_unit_vector_is_cached_on_add():
+    s = MemoryStore()
+    s.add("有向量", 5, NOW, embedding=(3.0, 4.0))
+    s.add("没向量", 5, NOW)
+    if memory_module._np is not None:
+        assert s.memories[0]._vec is not None
+        assert abs(float((s.memories[0]._vec ** 2).sum()) - 1.0) < 1e-9  # 归一化过了
+    assert s.memories[1]._vec is None
+
+
+def test_zero_vector_does_not_blow_up():
+    """全零向量算不出方向，归一化会除零——要退化成 None，而不是产生 nan 污染排序。"""
+    s = MemoryStore()
+    s.add("零向量", 5, NOW, embedding=(0.0, 0.0))
+    s.add("正常向量", 5, NOW, embedding=(1.0, 0.0))
+    assert s.memories[0]._vec is None
+    got = s.recall(frozenset(), NOW, k=2, query_embedding=(1.0, 0.0))
+    assert len(got) == 2  # 不崩，两条都还在
+
+
+def test_vectors_are_rebuilt_after_loading_from_disk(tmp_path):
+    """落盘存的是原始 tuple，读回来必须重新算归一化向量，否则重启之后检索会悄悄
+    退回慢路径（结果还是对的，但慢几百倍，属于那种不会报错的性能回归）。"""
+    s = MemoryStore()
+    s.add("有向量", 5, NOW, embedding=(3.0, 4.0))
+    path = tmp_path / "m.json"
+    s.save(path)
+    loaded = MemoryStore.load(path)
+    assert loaded.memories[0].embedding == (3.0, 4.0)  # 原始向量原样保留
+    if memory_module._np is not None:
+        assert loaded.memories[0]._vec is not None
+
+
+def test_embedding_stays_json_serialisable(tmp_path):
+    """归一化向量是另一个字段，不能污染 embedding——否则 numpy 的 float32 会让
+    json.dumps 直接抛 not JSON serializable。"""
+    s = MemoryStore()
+    s.add("有向量", 5, NOW, embedding=(0.6, 0.8))
+    path = tmp_path / "m.json"
+    s.save(path)  # 存得下去就说明没被污染
+    assert isinstance(s.memories[0].embedding, tuple)
+    assert all(isinstance(x, float) for x in s.memories[0].embedding)
+
+
+def test_memories_are_still_comparable():
+    """_vec 必须 compare=False：numpy 数组的 == 返回逐元素布尔数组，
+    一旦参与 dataclass 的 __eq__，任何拿 Memory 做相等判断的地方都会抛
+    "truth value of an array is ambiguous"。"""
+    s = MemoryStore()
+    s.add("一样的", 5, NOW, embedding=(1.0, 0.0))
+    s.add("一样的", 5, NOW, embedding=(1.0, 0.0))
+    a, b = s.memories
+    assert a == b  # 不抛异常，而且判定为相等
+    assert s.recall(frozenset(), NOW, k=0) == []
+
+
+# ---------- MMR 候选池：砍掉的都是数学上赢不了的 ----------
+def test_mmr_candidate_pool_is_exact_not_a_guess():
+    """砍候选用的是从 mmr_lambda 推出来的精确界，不是"取前 N 名"。
+    lambda=1.0 时界为 0，池子应该正好是前 k 条（MMR 退化成纯 top-k）。"""
+    s = _vector_store(5, 60, mmr_lambda=1.0)
+    scored = [(m, c, sum(c)) for m, c in s._ranking_components(frozenset(), NOW, None)]
+    scored.sort(key=lambda t: t[2], reverse=True)
+    assert len(s._mmr_candidates(scored, 5)) == 5
+
+
+def test_mmr_candidate_pool_keeps_everything_when_diversity_dominates():
+    """lambda 调到很低时，界会超过总分的量程，池子必须退回全量——
+    那正是"低分候选真的可能靠多样性翻盘"的情况，砍了就会算错。"""
+    s = _vector_store(5, 60, mmr_lambda=0.1)
+    scored = [(m, c, sum(c)) for m, c in s._ranking_components(frozenset(), NOW, None)]
+    scored.sort(key=lambda t: t[2], reverse=True)
+    assert len(s._mmr_candidates(scored, 5)) == len(scored)
+
+
+def test_mmr_candidate_pool_never_smaller_than_k():
+    s = _vector_store(5, 60, mmr_lambda=0.9)
+    scored = [(m, c, sum(c)) for m, c in s._ranking_components(frozenset(), NOW, None)]
+    scored.sort(key=lambda t: t[2], reverse=True)
+    assert len(s._mmr_candidates(scored, 5)) >= 5
