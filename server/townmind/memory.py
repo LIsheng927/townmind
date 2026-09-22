@@ -26,6 +26,11 @@ DEFAULT_TOP_K = 5
 # 反思（同样出自 Stanford 那篇论文）：累计重要度一旦过了这个数，就该停下来回顾一遍最近的事、
 # 提炼出更高层次的认识了——数值跟论文里"重要度分数之和越过阈值"的量级保持一致。
 REFLECTION_THRESHOLD = 150.0
+# 分层反思（同样出自那篇论文里的 reflection tree）：普通反思（下面这个阈值）是"从具体记忆
+# 里提炼感想"；这里是"从好几条感想里再提炼一层更抽象的认识"——累计的是"反思"这个 kind
+# 本身的重要度，数值比 REFLECTION_THRESHOLD 更高，因为攒够足够多条一级感想才值得再往上提炼
+# 一层，不然每次反思完马上又反思一次意义不大。
+META_REFLECTION_THRESHOLD = 300.0
 # MMR（Maximal Marginal Relevance）：top-k 排序完之后，会不会因为好几条记忆内容高度相似
 # 而一起挤进来、占掉本该属于"另一件事"的名额。lambda 越接近 1，越只看分数本身（退化成
 # 纯 top-k）；越接近 0，越优先追求多样性。0.7 是个"以相关性为主、但不完全无视重复"的取值。
@@ -48,6 +53,11 @@ class Memory:
     importance: int  # 1-10
     people: frozenset[str] = frozenset()
     embedding: tuple[float, ...] | None = None  # 语义向量；没配 embedding 客户端时恒为 None
+    # "event"：普通记忆（发生的事、说过的话）；"reflection"：一级反思（从若干 event 里提炼出的
+    # 感想）；"meta_reflection"：二级反思（从若干 reflection 里再提炼出的更抽象的认识）。
+    # 只用来决定"这条记忆该不该被算进分层反思的选材/计数里"，不影响 recall() 的排序——三种
+    # kind 在检索时一视同仁，都是靠新近度+重要度+相关度三项打分。
+    kind: str = "event"
 
 
 def format_age(seconds: float) -> str:
@@ -74,13 +84,18 @@ class MemoryStore:
         self.memories: list[Memory] = []
         self.met: set[str] = set()  # 已经见过的人，用来判断"第一次见到"
         self.importance_since_reflection: float = 0.0  # 上次反思以来，新记忆的重要度累计到了多少
+        self.importance_since_meta_reflection: float = 0.0  # 上次二级反思以来，新增的一级反思累计了多少重要度
 
     # ---- 存 ----
-    def add(self, text: str, importance: int, now: float, people=(), embedding=None) -> None:
+    def add(self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event") -> None:
         importance = max(1, min(10, int(importance)))
         emb = tuple(embedding) if embedding is not None else None
-        self.memories.append(Memory(text, now, importance, frozenset(people), emb))
+        self.memories.append(Memory(text, now, importance, frozenset(people), emb, kind))
         self.importance_since_reflection += importance
+        if kind == "reflection":
+            # 只有"一级反思"才计入二级反思的累计——普通事件、和二级反思本身都不算，
+            # 不然会变成"随便攒点日常小事就又反思一次"，失去分层的意义
+            self.importance_since_meta_reflection += importance
         if len(self.memories) > self.capacity:
             # 容量满了：淘汰"又旧又不重要"的那条（不看相关度，因为它此刻与谁有关/跟什么话题有关不重要）
             worst = min(range(len(self.memories)), key=lambda i: self.score(self.memories[i], frozenset(), now))
@@ -92,6 +107,12 @@ class MemoryStore:
 
     def mark_reflected(self) -> None:
         self.importance_since_reflection = 0.0
+
+    def should_meta_reflect(self, threshold: float = META_REFLECTION_THRESHOLD) -> bool:
+        return self.importance_since_meta_reflection >= threshold
+
+    def mark_meta_reflected(self) -> None:
+        self.importance_since_meta_reflection = 0.0
 
     # ---- 取 ----
     def component_scores(self, m: Memory, involved, now: float, query_embedding=None) -> tuple[float, float, float]:
@@ -186,6 +207,7 @@ class MemoryStore:
         data = {
             "met": sorted(self.met),
             "importance_since_reflection": self.importance_since_reflection,
+            "importance_since_meta_reflection": self.importance_since_meta_reflection,
             "memories": [
                 {
                     "text": m.text,
@@ -193,6 +215,7 @@ class MemoryStore:
                     "importance": m.importance,
                     "people": sorted(m.people),
                     "embedding": list(m.embedding) if m.embedding is not None else None,
+                    "kind": m.kind,
                 }
                 for m in self.memories
             ],
@@ -218,6 +241,9 @@ class MemoryStore:
                     # 老的记忆文件（加语义检索之前存的）没有这个字段，get 兜底成 None，
                     # 相关度就自动退化回"认不认人"那一版，不会因为读老文件而崩溃
                     tuple(d["embedding"]) if d.get("embedding") is not None else None,
+                    # 老的记忆文件（加分层反思之前存的）没有这个字段，兜底成 "event"——
+                    # 不会把老记忆错当成一级反思，二级反思的计数也不会被老数据污染
+                    d.get("kind", "event"),
                 )
                 for d in data["memories"]
             ]
@@ -226,6 +252,7 @@ class MemoryStore:
             # 老的记忆文件（加反思之前存的）没有这个字段，兜底成 0——大不了这个 NPC
             # 重新攒一轮重要度才触发下一次反思，不会因为读老文件而崩溃
             store.importance_since_reflection = float(data.get("importance_since_reflection", 0.0))
+            store.importance_since_meta_reflection = float(data.get("importance_since_meta_reflection", 0.0))
         except (OSError, ValueError, KeyError, TypeError) as e:
             log.warning("memory file %s is unreadable (%s); starting empty", path, e)
         return store

@@ -197,6 +197,8 @@ IMPORTANCE_LESSON = 7  # Reflexion 式教训：guard 分类器实锤一次编造
 # 故意不用 8——那是 IMPORTANCE_MET 的值，撞上了会没法区分"教训"和"第一次见到某人"这两类记忆
 # （踩过这个坑：写成 8 时单测里筛 importance==IMPORTANCE_LESSON 连"你第一次见到 Bob"也一起筛出来了）
 REFLECTION_RECENT_K = 20  # 反思时回顾最近这么多条记忆
+IMPORTANCE_META_REFLECTION = 10  # 二级反思是"感想的感想"，是整个记忆库里最抽象的一层认识，给满分
+META_REFLECTION_RECENT_K = 8  # 二级反思时回顾最近这么多条一级反思
 LORE_TOP_K = 3  # "镇上的事"语义检索之后，最多留几条塞进提示词
 
 
@@ -473,6 +475,7 @@ class Agent:
             await self._remember(npc_id, now, heard, nearby, action, ended)
             if self.use_reflection and self.llm is not None:
                 await self._maybe_reflect(npc_id, now)
+                await self._maybe_meta_reflect(npc_id, now)
             # source == "llm"：这一轮确实是大模型自己给出的回应（没被 guard 拦下退回兜底），
             # 说明它真有机会针对被标记的可疑记忆做出反应，这时候才值得学一次教训
             if self.reflexion_lessons and suspect_said and source == "llm":
@@ -834,8 +837,43 @@ class Agent:
             return
         embeddings = await self._embed_texts(insights)
         for text, emb in zip(insights, embeddings):
-            store.add(f"你反思后意识到：{text}", IMPORTANCE_REFLECTION, now, embedding=emb)
+            store.add(f"你反思后意识到：{text}", IMPORTANCE_REFLECTION, now, embedding=emb, kind="reflection")
             self.stats["reflections"] += 1
+
+    async def _maybe_meta_reflect(self, npc_id: str, now: float) -> None:
+        """分层反思的第二层（Stanford 论文里的 reflection tree）：_maybe_reflect() 是从具体
+        记忆里提炼感想，这里是攒够了足够多条感想之后，再从这些感想本身里提炼出更抽象的一层
+        认识——"我总是……""我发现自己……"这种跨事件的规律，而不是针对某一件具体事的感想。
+        选材只看 kind == "reflection" 的记忆（不含 event，也不含更早的 meta_reflection，
+        不然会无限套娃），一样用新近度+重要度打分挑最"该往上提炼"的那几条。"""
+        store = self._mem(npc_id)
+        if not store.should_meta_reflect():
+            return
+        reflections = [m for m in store.memories if m.kind == "reflection"]
+        ranked = sorted(reflections, key=lambda m: store.score(m, frozenset(), now), reverse=True)
+        material = sorted(ranked[:META_REFLECTION_RECENT_K], key=lambda m: m.time, reverse=True)
+        store.mark_meta_reflected()  # 不管这次成不成功都先清零，失败了也不会每轮都重新触发
+        if not material:
+            return
+        persona = PERSONAS.get(npc_id, DEFAULT_PERSONA)
+        system = (
+            f"你是游戏小镇里的 NPC「{persona['name']}」，下面这些是你之前陆续总结出的一些感想。"
+            "试着看看这几条感想放在一起，有没有更深一层、更抽象的规律或原则——不是重复某一条"
+            "感想，而是从好几条感想里再往上提炼一层，每条不超过 30 个字。"
+        )
+        user = "\n".join(f"- {format_age(now - m.time)}：{m.text}" for m in material)
+        call = await self._call_llm_tool(npc_id, system, user, REFLECT_TOOL, "meta_reflection_calls")
+        if call is None:
+            return
+        try:
+            insights = Reflect(**call.arguments).insights
+        except Exception as e:
+            log.warning("[%s] 二级反思格式不对（%s: %s），跳过这次反思", npc_id, type(e).__name__, e)
+            return
+        embeddings = await self._embed_texts(insights)
+        for text, emb in zip(insights, embeddings):
+            store.add(f"你更深一层的体会是：{text}", IMPORTANCE_META_REFLECTION, now, embedding=emb, kind="meta_reflection")
+            self.stats["meta_reflections"] += 1
 
     def memory_dump(self, npc_id: str) -> list[dict]:
         return self._mem(npc_id).dump(self.clock())
