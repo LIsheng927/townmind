@@ -6,6 +6,7 @@ from townmind.memory import (
     MemoryStore,
     conveys,
     format_age,
+    is_raw_dialogue,
     retold_importance,
 )
 
@@ -489,3 +490,28 @@ def test_conveys_ignores_the_memory_wrapper_text():
     # "对你说"这种包装不算内容，不能靠它制造重合
     assert not conveys("Bob对你说：「集市的米价涨了三成」", "Carol对你说：「今天天气不错」")
     assert conveys("Bob对你说：「集市的米价涨了三成」", "米价涨了三成，Bob 说的")
+
+
+# ---------- 分享候选池：只要"事"，不要对话原文 ----------
+def test_raw_dialogue_lines_are_not_offered_as_gossip():
+    s = MemoryStore()
+    s.add("Bob对你说：「嗯。」", 6, NOW, {"bob"})
+    s.add("你对Bob说了「嗨」", 6, NOW, {"bob"})
+    s.add("你第一次见到Milo", 8, NOW, {"milo"})
+    s.add("玩家对你说：「你们是傻逼」", 6, NOW, {"player"})
+    assert s.shareable("carol", NOW, k=5) == []
+
+
+def test_facts_hearsay_and_topic_tagged_lines_are_still_offered():
+    s = MemoryStore()
+    s.add("集市的米价涨了三成", 9, NOW, {"player"})  # 一件事
+    s.add("Alice对你说：「听说 Dan 把钥匙弄丢了」", 7, NOW - 1, {"alice"}, hop=1)  # 别人以传闻口吻讲的
+    s.add("Bob对你说：「嗨」", 7, NOW - 2, {"bob"}, topic="r1")  # 带 topic 的（悄悄话的转述）
+    assert {m.text for m in s.shareable("carol", NOW, k=5)} == {
+        "集市的米价涨了三成", "Alice对你说：「听说 Dan 把钥匙弄丢了」", "Bob对你说：「嗨」",
+    }
+
+
+def test_is_raw_dialogue_matches_only_the_three_wrappers():
+    assert is_raw_dialogue("Bob对你说：「嗯。」") and is_raw_dialogue("你说了「嗯」") and is_raw_dialogue("你第一次见到Bob")
+    assert not is_raw_dialogue("讨论了面粉涨价对销售的影响") and not is_raw_dialogue("医馆的 Dan 把钥匙弄丢了")

@@ -84,6 +84,23 @@ def _content_pieces(text: str) -> set[str]:
     return pieces
 
 
+# 对话流水账的三种固定写法（见 agent._remember）：别人对我说的原话、我自己说过的话、第一次见到谁
+_RAW_DIALOGUE_RE = re.compile(r"^(?:.+?对你说：「|你(?:对.+?)?说了「|你第一次见到)")
+
+
+def is_raw_dialogue(text: str) -> bool:
+    """这条记忆是不是一句对话原文（而不是一件"事"）。
+
+    主动分享的候选池里不该有这些：实验台上拿真实模型跑出来的 124 条"给了候选但没说出口"
+    逐条看过——102 条候选是「Bob对你说：「嗯。」」「Dan对你说：「来一杯麦酒吧」」这种原话，
+    8 条是「你第一次见到Milo」，8 条是玩家骂人的原话。模型不转述它们是对的：真人不会把
+    别人随口一句话当新闻讲给第三个人听。候选池里全是这种东西，真正的消息（悄悄话）反而
+    因为不够新而排不上号。
+
+    hop>=1 的原话不在此列（调用方负责）：那是别人以传闻口吻讲给我的事，是传播链的载体。"""
+    return bool(_RAW_DIALOGUE_RE.match(text))
+
+
 def conveys(source_text: str, utterance: str) -> bool:
     """这句话有没有真的把那件事讲出去。
 
@@ -450,11 +467,12 @@ class MemoryStore:
     def shareable(self, other: str, now: float, min_importance: int = SHARE_MIN_IMPORTANCE, k: int = 1) -> list[Memory]:
         """挑出"值得主动跟 other 说、而且还没跟ta说过"的记忆，按打分从高到低给前 k 条。
 
-        三层筛选，每一层都是为了让主动搭话显得自然而不是机械：
+        四层筛选，每一层都是为了让主动搭话显得自然而不是机械：
           1. 重要度够高——鸡毛蒜皮的事不值得特意提起；
           2. 还没跟这个人讲过（told_to）——不然同一件事会翻来覆去讲给同一个人听；
           3. 这个人自己不在这条记忆里（other not in people）——不要把对方刚说过的话
-             当成新鲜事讲回给ta听，这是最容易让人出戏的一种。
+             当成新鲜事讲回给ta听，这是最容易让人出戏的一种；
+          4. 是件事、不是对话原文（is_raw_dialogue）——除非它带 topic 或是 hop>=1 的传闻。
 
         排序复用 score()（新近度+重要度），不带 query_embedding：这里问的是"我手上有什么
         值得说的事"，不是"跟此刻的话题有多相关"——相关性该由大模型看着当下的对话自己判断，
@@ -462,7 +480,12 @@ class MemoryStore:
         pool = [
             m
             for m in self.memories
-            if m.importance >= min_importance and other not in m.told_to and other not in m.people
+            if m.importance >= min_importance
+            and other not in m.told_to
+            and other not in m.people
+            # 第四层：得是件"事"，不是一句对话原文（见 is_raw_dialogue）。带 topic 的（悄悄话
+            # 及其每一手转述）和 hop>=1 的（别人以传闻口吻告诉我的）例外——那正是要传的东西
+            and (m.topic or m.hop >= 1 or not is_raw_dialogue(m.text))
         ]
         pool.sort(key=lambda m: self.score(m, frozenset(), now), reverse=True)
         return pool[: max(0, k)]
