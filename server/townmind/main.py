@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from . import world
@@ -48,6 +49,13 @@ app.state.agent = Agent(
 )
 
 
+# 网页 demo 挂在根路径上：服务一起来，浏览器打开 http://127.0.0.1:8000/ 就能玩，
+# 不用再手动去文件系统里双击 html。真正的 mount 放在本文件末尾——StaticFiles 挂在 "/"
+# 上会吃掉所有未匹配的路径，必须等 /health /stats /rumor 这些路由都注册完再挂，
+# 否则它们会被静态文件服务盖掉。
+_WEB_DEMO = Path(__file__).resolve().parents[1] / "web_demo"
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -57,6 +65,22 @@ async def health() -> dict:
 async def memories(npc_id: str) -> list[dict]:
     """查看某个 NPC 现在记得什么（最新的 50 条），方便调试和理解记忆系统。"""
     return app.state.agent.memory_dump(npc_id)
+
+
+@app.get("/rumor/{topic}")
+async def rumor(topic: str) -> dict:
+    """一条消息现在传到哪儿了：谁知道、第几手、各人嘴里是什么版本、从谁那儿听来的。
+    传话 demo 的数据源——把"信息在小镇里怎么流动"这件本来只存在于 JSON 里的事画出来。"""
+    return app.state.agent.rumor_trace(topic)
+
+
+@app.get("/recall/{npc_id}")
+async def recall(npc_id: str) -> dict:
+    """某个 NPC 最近一次决策时想起了什么，以及每条记忆的三项分数各是多少。
+
+    这是整个记忆系统里最值得看、却一直看不见的部分：光看 NPC 说了什么，看不出它
+    凭什么想起这条而不是那条。recall_explained() 早就写好了，这里把它接出来。"""
+    return {"npc_id": npc_id, "recalled": app.state.agent.last_recall.get(npc_id, [])}
 
 
 @app.get("/stats")
@@ -135,6 +159,16 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
+            elif msg.type == "whisper":
+                # 玩家凑到某个 NPC 耳边说一件事：只有他知道，旁边的人听不见。
+                # 跟 player_say 的区别就在这儿——那个是当众说，会变成附近所有人都能
+                # 听到的说话事件；这个是传话游戏的起点，必须只有一个源头。
+                info = app.state.agent.whisper(
+                    msg.npc_id or "unknown",
+                    str(msg.payload.get("text", "")),
+                    str(msg.payload.get("topic", "rumor")),
+                )
+                log.info("[player] 悄悄告诉 %s：%s", info["npc_id"], info["text"])
             elif msg.type == "status_query":
                 await send(Envelope(type="status", npc_id=msg.npc_id, payload=_companion_status(msg.npc_id or "unknown")))
             else:
@@ -144,3 +178,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
     finally:
         for t in tasks:
             t.cancel()
+
+
+if _WEB_DEMO.is_dir():
+    app.mount("/", StaticFiles(directory=str(_WEB_DEMO), html=True), name="web_demo")
