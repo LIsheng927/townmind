@@ -76,6 +76,10 @@ namespace TownMind.World
             _input.text = "";
             if (string.IsNullOrEmpty(text) || _client == null) return;
             var p = transform.position;
+            // TownClient.Update() 只打印收到的消息（"<-"），发出去的东西之前完全没有日志——
+            // 打了字按回车却在 Console 里看不到任何反应，不知道是没发出去还是发了没人回，
+            // 这里补一条，至少能确认"确实发出去了、发的是这句话"。
+            Debug.Log($"[Player] -> player_say: {text}");
             _ = _client.Send(new Envelope
             {
                 Type = "player_say",

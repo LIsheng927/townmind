@@ -112,8 +112,15 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 # 轻量的位置更新：不触发决策，也没有回复
                 app.state.agent.update_position(msg.npc_id or "unknown", msg.payload.get("pos"))
             elif msg.type == "player_say":
-                # 玩家说话：先过入口检查，再变成附近 NPC 能听到的说话事件；不需要回复
-                app.state.agent.hear_player(str(msg.payload.get("text", "")), msg.payload.get("pos"))
+                # 玩家说话：先过入口检查，再变成附近 NPC 能听到的说话事件；不需要回复。
+                # 这一步之前完全没有日志——玩家打字发出去之后，服务端这边收没收到、
+                # 入口检查有没有拦下，从终端输出上完全看不出来，调试的时候只能瞎猜。
+                text = str(msg.payload.get("text", ""))
+                res = app.state.agent.hear_player(text, msg.payload.get("pos"))
+                if res.ok:
+                    log.info("[player] said: %s%s", res.text, f" flags={list(res.flags)}" if res.flags else "")
+                else:
+                    log.info("[player] said 被入口检查拦下（flags=%s）：%s", list(res.flags), text)
             elif msg.type == "observation":
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)
