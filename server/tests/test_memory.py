@@ -431,3 +431,38 @@ def test_mmr_candidate_pool_never_smaller_than_k():
     scored = [(m, c, sum(c)) for m, c in s._ranking_components(frozenset(), NOW, None)]
     scored.sort(key=lambda t: t[2], reverse=True)
     assert len(s._mmr_candidates(scored, 5)) >= 5
+
+
+# ---------- 相关度归一化开关 ----------
+def _normalization_store() -> MemoryStore:
+    """三条记忆，跟查询向量 (1,0) 的余弦分别是 0.48 / 0.14 / 0.12——这组数字照抄自真实
+    embedding 上观察到的那次：对题的那条也才 0.48，不对题的也有 0.12 的基线。"""
+    s = MemoryStore()
+    for text, cos, imp in [("对题的", 0.48, 3), ("不对题 A", 0.14, 9), ("不对题 B", 0.12, 9)]:
+        s.add(text, imp, NOW, embedding=(cos, (1 - cos * cos) ** 0.5))
+    return s
+
+
+def test_normalization_on_stretches_relevance_to_full_range():
+    got = _normalization_store().recall_explained(frozenset(), NOW, k=3, query_embedding=(1.0, 0.0))
+    rel = {d["text"]: d["relevance"] for d in got}
+    assert rel["对题的"] == 1.0 and rel["不对题 B"] == 0.0
+    # 归一化之后，对题但不重要（3）的那条能赢过不对题但很重要（9）的：
+    # 1.0 + 0.3 = 1.3  >  0.056 + 0.9 = 0.956
+    assert got[0]["text"] == "对题的"
+
+
+def test_normalization_off_keeps_raw_cosine_and_importance_wins():
+    s = _normalization_store()
+    s.normalize_relevance = False
+    got = s.recall_explained(frozenset(), NOW, k=3, query_embedding=(1.0, 0.0))
+    rel = {d["text"]: d["relevance"] for d in got}
+    assert abs(rel["对题的"] - 0.48) < 1e-6 and abs(rel["不对题 B"] - 0.12) < 1e-6
+    # 不归一化时相关度只拉开 0.36 分，被重要度的 0.6 分差压过——对题的排到最后。
+    # 这正是加归一化之前在真实 embedding 上看到的毛病。
+    assert got[-1]["text"] == "对题的"
+
+
+def test_normalization_flag_is_a_constructor_argument_too():
+    assert MemoryStore(normalize_relevance=False).normalize_relevance is False
+    assert MemoryStore().normalize_relevance is True

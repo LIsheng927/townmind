@@ -50,3 +50,16 @@ def test_player_say_reaches_agent_without_reply():
         ws.send_json({"type": "hello"})
         assert ws.receive_json()["type"] == "welcome"
     assert any(e.speaker == "player" and e.text == "你好呀" for e in app.state.agent.events)
+
+
+def test_flags_round_trip_and_bad_input():
+    before = client.get("/flags").json()
+    assert before["use_gossip"] is False and before["normalize_relevance"] is True
+    try:
+        after = client.post("/flags", json={"use_gossip": True, "mmr_lambda": 1.0}).json()
+        assert after["use_gossip"] is True and after["mmr_lambda"] == 1.0
+        assert client.get("/flags").json() == after
+        r = client.post("/flags", json={"no_such_flag": True})
+        assert r.status_code == 400 and "no_such_flag" in r.json()["detail"]
+    finally:
+        client.post("/flags", json=before)  # 别把开关留给后面的测试

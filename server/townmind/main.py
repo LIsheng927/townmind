@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
@@ -81,6 +81,24 @@ async def recall(npc_id: str) -> dict:
     这是整个记忆系统里最值得看、却一直看不见的部分：光看 NPC 说了什么，看不出它
     凭什么想起这条而不是那条。recall_explained() 早就写好了，这里把它接出来。"""
     return {"npc_id": npc_id, "recalled": app.state.agent.last_recall.get(npc_id, [])}
+
+
+@app.get("/flags")
+async def get_flags() -> dict:
+    return app.state.agent.flags()
+
+
+@app.post("/flags")
+async def set_flags(changes: dict[str, bool | float]) -> dict:
+    """运行时切开关，不重启服务、不清记忆。这是 demo 的核心接口：面板上每个开关点一下
+    就打到这里，下一轮决策立刻按新设置走，于是可以在同一个小镇、同一批记忆上当场做
+    A/B——把归一化关掉看 NPC 想起来的东西怎么变，把八卦关掉看消息还传不传。
+
+    环境变量（TOWNMIND_USE_GOSSIP 那些）只决定启动时的初值，这里改的不落盘，重启即还原。"""
+    try:
+        return app.state.agent.set_flags(**changes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/stats")

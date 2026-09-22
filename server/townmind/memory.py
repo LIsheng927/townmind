@@ -158,10 +158,15 @@ class MemoryStore:
         capacity: int = DEFAULT_CAPACITY,
         half_life: float = RECENCY_HALF_LIFE,
         mmr_lambda: float = MMR_LAMBDA,
+        normalize_relevance: bool = True,
     ) -> None:
         self.capacity = capacity
         self.half_life = half_life
         self.mmr_lambda = mmr_lambda
+        # 相关度是否按本次候选池做 min-max 归一化（见 _ranking_components 的说明）。默认开——
+        # 关掉就是加这一步之前的旧行为，留这个开关只为了能做 A/B 对比：同一批记忆、同一个
+        # 问题，开和关想起来的东西不一样，这是真实 embedding 上才看得出来的差别。
+        self.normalize_relevance = normalize_relevance
         self.memories: list[Memory] = []
         self.met: set[str] = set()  # 已经见过的人，用来判断"第一次见到"
         self.importance_since_reflection: float = 0.0  # 上次反思以来，新记忆的重要度累计到了多少
@@ -302,7 +307,7 @@ class MemoryStore:
                 if s is not None:
                     comps[2] = max(0.0, s)
                 raw.append([m, comps])
-        if query_embedding is not None:
+        if query_embedding is not None and self.normalize_relevance:
             embedded = [i for i, (m, _) in enumerate(raw) if m.embedding is not None]
             if len(embedded) >= 2:
                 rels = [raw[i][1][2] for i in embedded]
