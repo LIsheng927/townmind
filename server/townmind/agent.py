@@ -72,6 +72,9 @@ MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙�
 # 一件事给同一个人提示了这么多次、大模型一次都没说出口，就不再提了：可能是话题
 # 实在接不上，也可能是它觉得不该说。放弃比每一轮都在提示词里挂着同一条强。
 SHARE_GIVE_UP_AFTER = 3
+# assertive_sharing 开着时，重要度达到这个数的事才会被"明确要求提一下"；不到的照旧软提示。
+# 不是所有候选都硬推：把每件够分量的事都变成必说，NPC 就成了见谁都推销同一条消息的复读机
+SHARE_ASSERTIVE_IMPORTANCE = 8
 
 # 运行时可以切的开关（见 flags / set_flags）。这份名单是 demo 的骨架：演示的不是 NPC 聊天，
 # 是"同一个小镇、同一个问题，把某项技术关掉会怎样"——所以每个开关都必须能在服务不重启的
@@ -84,6 +87,7 @@ RUNTIME_BOOL_FLAGS = (
     "use_reflection",
     "use_relationships",
     "use_gossip",
+    "assertive_sharing",
     "compress_conversations",
     "distrust_own_memory",
     "expressive_dialogue",
@@ -338,6 +342,9 @@ class Agent:
         use_gossip: bool = False,  # 主动把自己知道的事讲给别人听（八卦）。不额外花 LLM 调用，
         # 只是在提示词里多给一条候选；跟 use_relationships 分开是为了能单独做消融——
         # 两个都开时，信不过的人不会听到你知道的事
+        assertive_sharing: bool = False,  # 分享提示的强度。关：软提示（"可以顺口提一句，也可以不说"），
+        # 实验台实测真实模型只有约 8% 的轮次真把事说出口；开：够重要的事（>= SHARE_ASSERTIVE_IMPORTANCE）
+        # 明确要求这句话里提一下。默认关，留着做 A/B——两种提示下的"说出口率"是个值得报告的数字
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -361,6 +368,7 @@ class Agent:
         self.reflexion_lessons = reflexion_lessons
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
+        self.assertive_sharing = assertive_sharing
         self.compress_conversations = compress_conversations
         # 记忆检索的两个可调项放在 Agent 上，而不只在 MemoryStore 上：每个 NPC 一个 store、
         # 懒加载，运行时切换必须一次改到所有已加载的、以及以后才加载的（见 _mem / set_flags）
@@ -684,6 +692,8 @@ class Agent:
                     # 没说出口：不算讲过，下一轮还会提示；但提示了 SHARE_GIVE_UP_AFTER 次
                     # 都没说，就当讲过了——别让同一条永远挂在提示词里
                     self.stats["share_hints_ignored"] += 1
+                    # 打出来是为了给 conveys() 的阈值定标：看这些"没说出口"里有没有其实说了的
+                    log.info("[%s] 给了候选但没说出口 → %s | 候选：%s | 说的：%s", npc_id, _name(other), mem.text, action["text"])
                     key = (npc_id, other, mem.text)
                     self._share_ignored[key] += 1
                     if self._share_ignored[key] >= SHARE_GIVE_UP_AFTER:
@@ -1571,10 +1581,16 @@ class Agent:
             # NPC 会变成见谁都推销同一条消息的复读机；给成"可以说也可以不说"，说不说由
             # 大模型看着当下的话题自己定，才像真人闲聊时想起一件事顺口提一嘴
             other, mem = share_hint
-            lines.append(
-                f"你还知道一件{_name(other)}多半还不知道的事：「{mem.text}」。"
-                "如果聊得下去，可以顺口提一句；话题对不上、或者不想说，也可以不说。"
-            )
+            if self.assertive_sharing and mem.importance >= SHARE_ASSERTIVE_IMPORTANCE:
+                lines.append(
+                    f"你还知道一件{_name(other)}多半还不知道的事：「{mem.text}」。"
+                    "这件事够重要，这句话里就告诉ta——用你自己的话说，不用照搬原句。"
+                )
+            else:
+                lines.append(
+                    f"你还知道一件{_name(other)}多半还不知道的事：「{mem.text}」。"
+                    "如果聊得下去，可以顺口提一句；话题对不上、或者不想说，也可以不说。"
+                )
         said = len(self.say_times[npc_id])
         if said:
             lines.append(f"你在最近 {CHAT_WINDOW:.0f} 秒内已经说了 {said} 句话（最多 {MAX_SAYS_PER_WINDOW} 句）。")

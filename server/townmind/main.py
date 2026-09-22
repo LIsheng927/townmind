@@ -41,6 +41,7 @@ app.state.agent = Agent(
     use_reflection=bool(os.getenv("TOWNMIND_USE_REFLECTION")),
     use_relationships=bool(os.getenv("TOWNMIND_USE_RELATIONSHIPS")),
     use_gossip=bool(os.getenv("TOWNMIND_USE_GOSSIP")),
+    assertive_sharing=bool(os.getenv("TOWNMIND_ASSERTIVE_SHARING")),
     compress_conversations=bool(os.getenv("TOWNMIND_COMPRESS_CONVERSATIONS")),
     # 这两个真实数据没测出正向收益（见 README"CoVe 式重试和 Reflexion 式教训记忆"
     # 小节），保持默认关。这里照样接上环境变量，是为了想重新验证时不用改代码——

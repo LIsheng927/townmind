@@ -1983,3 +1983,24 @@ def test_hint_actually_spoken_is_counted_and_tagged():
     assert a.stats["shares_told"] == 1
     heard = [m for m in a._mem("bob").memories if "对你说" in m.text][0]
     assert heard.hop == 1 and heard.topic == "rice"
+
+
+def test_assertive_sharing_changes_the_hint_wording_only_for_important_news():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "嗯"})] * 2)
+    a = Agent(llm, use_gossip=True, assertive_sharing=True, clock=clock)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    decide(a)
+    assert "这句话里就告诉" in llm.users[0]
+    # 不够重要的事照旧软提示
+    b = Agent(ScriptedLLM([ToolCall("say", {"text": "嗯"})]), use_gossip=True, assertive_sharing=True, clock=clock)
+    b._mem("alice").add("路边有只猫", importance=6, now=clock())
+    decide(b)
+    assert "也可以不说" in b.llm.users[0]
+
+
+def test_soft_sharing_is_the_default():
+    clock = FakeClock()
+    a, llm = _rumor_agent(clock, ["嗯"])
+    decide(a)
+    assert "也可以不说" in llm.users[0] and "这句话里就告诉" not in llm.users[0]
