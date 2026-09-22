@@ -386,3 +386,77 @@ def test_positions_setdefault_stays_in_sync_with_spatial_index():
     a.positions.setdefault("bob", (1.0, 1.0))
     a.update_position("alice", [0.0, 0.0])
     assert "bob" in dict(a._nearby("alice"))
+
+
+# ---------- 自研防御模型（guard model）作为可选的第二层 ----------
+class StubGuardModel:
+    """假的 GuardModel：不装 torch，只测 Agent 这边"怎么用"这一层，不测模型本身的准确率
+    （模型本身的准确率由 guard/evaluate.py 在真实权重、真实依赖的环境里单独验证）。"""
+
+    def __init__(self, label):
+        self.label = label
+        self.calls = []
+
+    def classify(self, npc_id, text):
+        self.calls.append((npc_id, text))
+        return self.label
+
+
+def test_guard_model_none_by_default_does_not_change_behaviour():
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})))
+    assert a.guard_model is None
+    assert decide(a) == {"name": "say", "text": "你好呀"}
+
+
+def test_guard_model_ok_label_still_passes_through():
+    stub = StubGuardModel("ok")
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=stub)
+    assert decide(a) == {"name": "say", "text": "你好呀"}
+    assert stub.calls == [("alice", "你好呀")]
+
+
+def test_guard_model_catches_what_regex_cannot():
+    """unsafe（语气差/不耐烦）是正则完全没有检测能力的一类（见 guard/evaluate.py 里
+    regex_baseline_predict 的说明），guard model 是唯一能查到这类问题的地方。"""
+    stub = StubGuardModel("unsafe")
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=stub)
+    r = decide(a)
+    assert r["name"] == "say" and r["text"] in ALICE_GREETINGS  # 被拦下，换成行为树台词
+    assert a.stats["guard_blocked"] == 1
+    assert a.stats["guard_guard_model_unsafe"] == 1
+    assert a.stats["guard_model_calls"] == 1
+
+
+def test_guard_model_not_consulted_when_regex_already_blocks():
+    """正则已经判定有问题时不该再多花一次（可能要几百毫秒的）推理去问模型。"""
+    stub = StubGuardModel("ok")
+    a = Agent(FakeLLM(ToolCall("say", {"text": "作为一个AI我不能这样做"})), guard_model=stub)
+    decide(a)
+    assert stub.calls == []
+    assert a.stats.get("guard_model_calls", 0) == 0
+
+
+def test_guard_model_exception_degrades_to_regex_result():
+    class BoomGuardModel:
+        def classify(self, npc_id, text):
+            raise RuntimeError("boom")
+
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=BoomGuardModel())
+    assert decide(a) == {"name": "say", "text": "你好呀"}  # 没有因为这一层的异常连累整体决策
+
+
+def test_guard_model_runs_in_a_thread_not_blocking_event_loop():
+    """确保是真的丢进线程池跑的（asyncio.to_thread），不是同步直接调用——
+    不然会跟并发压测那一轮想避免的"卡住事件循环"是同一个问题。"""
+    import threading
+
+    seen_thread = {}
+
+    class ThreadCheckingGuardModel:
+        def classify(self, npc_id, text):
+            seen_thread["name"] = threading.current_thread().name
+            return "ok"
+
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=ThreadCheckingGuardModel())
+    decide(a)
+    assert seen_thread["name"] != threading.main_thread().name

@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from . import world
 from .agent import Agent
+from .guard_model import ENV_ENABLE, GuardModel
 from .llm.factory import make_client
 from .protocol import Envelope
 
@@ -17,7 +18,11 @@ log = logging.getLogger("townmind")
 app = FastAPI(title="TownMind server")
 _llm = make_client()  # 先创建（这一步会读取 .env），再读数据目录配置
 DATA_DIR = Path(os.getenv("TOWNMIND_DATA_DIR") or Path(__file__).resolve().parents[1] / "data")
-app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories")
+# 自研防御模型是可选的第二层安全检查（见 guard/README.md "接入服务"一节）：没设这个环境变量、
+# 没装可选依赖（uv sync --group guard-model）、或者没有训练好的 adapter，都会在真正用到时
+# 优雅跳过，不影响服务启动，所以这里可以放心地无条件构造 GuardModel()。
+_guard_model = GuardModel() if os.getenv(ENV_ENABLE) else None
+app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories", guard_model=_guard_model)
 
 
 @app.get("/health")

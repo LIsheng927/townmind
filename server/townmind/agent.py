@@ -13,7 +13,7 @@ import time
 from collections import UserDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -129,12 +129,17 @@ class Agent:
         breaker: CircuitBreaker | None = None,
         max_concurrent_llm: int = 4,  # 同一时刻最多有几个大模型请求在路上
         safety_layers: frozenset[str] = frozenset({"input", "prompt", "output", "memory"}),  # 评测时可逐层关闭
+        guard_model: Any | None = None,  # 可选：guard/ 训练出来的 LoRA 分类器（townmind.guard_model.GuardModel）
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
         self.use_memory = use_memory
         self.safety_layers = safety_layers
         self.use_lore = use_lore
+        # 用 Any 而不是直接 import GuardModel：那个模块要用到 torch/transformers/peft，
+        # 是可选依赖，agent.py 是热路径、有 124 个单元测试，不应该因为选装的推理库没装
+        # 就连带 import 失败。这里只是"鸭子类型"地调用 .classify(npc_id, text)。
+        self.guard_model = guard_model
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -174,12 +179,18 @@ class Agent:
         self._next_event_id += 1
         return res
 
-    def _guard_output(self, npc_id, action, heard, nearby, status):
-        """大模型的答案发出去之前，再过一遍质检员。不通过就换成行为树的台词。"""
+    async def _guard_output(self, npc_id, action, heard, nearby, status):
+        """大模型的答案发出去之前，再过一遍质检员。不通过就换成行为树的台词。
+
+        先走正则规则（快、零依赖）；只有正则判"没问题"、而且配了自研的 guard model 时，
+        才再问一遍模型——guard model 只会让判断更严格，不会推翻正则已经拦下的东西，
+        所以两层叠加永远比单独一层更安全，不存在"模型把正则挡住的东西又放行"的情况。"""
         text = action.get("text") if action["name"] == "say" else action.get("farewell") if action["name"] == "end_conversation" else None
         if text is None:
             return action, "llm"
         res = safety.check_npc_reply(text, " ".join(e.text for e in heard))
+        if res.ok and self.guard_model is not None:
+            res = await self._consult_guard_model(npc_id, text, res)
         if res.ok:
             return action, "llm"
         self.stats["guard_blocked"] += 1
@@ -187,6 +198,20 @@ class Agent:
             self.stats[f"guard_{f}"] += 1
         log.warning("[%s] output blocked %s: %s", npc_id, res.flags, text)
         return self._fallback(npc_id, heard, nearby, status), "fallback"
+
+    async def _consult_guard_model(self, npc_id: str, text: str, res: safety.GuardResult) -> safety.GuardResult:
+        """guard model 推理是同步、阻塞的调用（CPU 上一次生成可能要几百毫秒到一两秒），
+        丢到线程池里跑，不能直接 await 一个同步函数——不然会卡住事件循环，连带卡住这一刻
+        所有其他 NPC 的决策，这正是并发压测那一轮想要避免的事。"""
+        try:
+            label = await asyncio.to_thread(self.guard_model.classify, npc_id, text)
+        except Exception as e:  # 这一层本身不该有未捕获异常，多一层保险，不让它拖垮主流程
+            log.warning("[%s] guard model 调用异常（%s: %s），跳过这一层", npc_id, type(e).__name__, e)
+            return res
+        if label is None or label == "ok":
+            return res  # None：模型不可用；"ok"：模型也没查出问题——都维持正则的判断
+        self.stats["guard_model_calls"] += 1
+        return safety.GuardResult(False, text, [f"guard_model_{label}"])
 
     def update_position(self, npc_id: str, pos) -> None:
         """记录 NPC 的最新位置。Unity 走路时会定期上报，所以"谁在附近"不会用过期位置来判断。"""
@@ -211,7 +236,7 @@ class Agent:
                 # 只有这一种情况才花钱问大模型
                 action, source = await self._ask_llm(npc_id, heard, nearby, recalled, now)
                 if source == "llm" and "output" in self.safety_layers:
-                    action, source = self._guard_output(npc_id, action, heard, nearby, status)
+                    action, source = await self._guard_output(npc_id, action, heard, nearby, status)
             elif interesting and status == "cooldown":
                 # 刚说过话，还不能再说：原地等对方回应，而不是走开
                 wait = SAY_COOLDOWN - (now - self.last_said[npc_id])

@@ -14,7 +14,25 @@ dependencies = [
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.6"]
+# 自研防御模型（guard/ 训练出来的 LoRA 分类器，townmind/guard_model.py）是可选的安全增强层，
+# 默认不装：uv sync 默认不拉取这几百 MB 到几 GB 的推理库，想启用时用 `uv sync --group guard-model`。
+# 没装这个组、或者没设 TOWNMIND_USE_GUARD_MODEL 环境变量，服务照常用纯正则规则运行。
+guard-model = [
+    "torch>=2.3",
+    "transformers>=4.44",
+    "peft>=0.12",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+# uv sync 默认从 PyPI 拿 torch，PyPI 上的是纯 CPU 版；这里把 torch 单独指到 PyTorch
+# 官方的 CUDA 12.8 源，RTX 50 系列（Blackwell 架构）至少要这个版本的 CUDA 才认得出来。
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

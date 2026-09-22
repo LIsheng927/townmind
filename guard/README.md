@@ -40,7 +40,7 @@ guard/adapters/   训练出的 LoRA 权重（体积大，会被 gitignore）
 1. `generate_data.py`：用真实大模型按三个领域生成带标签数据
 2. `train.py`：在训练集上用 LoRA 微调 Qwen2.5-1.5B-Instruct（本机 GPU 跑）
 3. `evaluate.py`：在两份留出测试集上，对比正则 vs. 训练模型
-4. （还没做）接入 `server/townmind/guard_model.py`：作为 `safety.check_npc_reply` 的第三层
+4. `server/townmind/guard_model.py`：接进服务实际会跑的链路，见下面"接入服务"一节
 
 ## 实测结果（RTX 5080，Qwen2.5-1.5B-Instruct + LoRA，训练数据 515 条 / 3 轮）
 
@@ -85,3 +85,28 @@ guard/adapters/   训练出的 LoRA 权重（体积大，会被 gitignore）
 提升，更精准的做法不是单纯堆更多领域，而是针对性地在现有领域里补上这几种"写法上的盲区"。
 
 详细结果见 `eval_results.json`（汇总数字）和 `eval_details.json`（每一条的具体预测，用来做上面这种错误分析）。
+
+
+## 接入服务
+
+`server/townmind/guard_model.py` 把训练好的 adapter 接进了 `Agent._guard_output`——大模型的回复过完正则规则
+之后，如果正则判"没问题"、而且服务配了这一层，再额外问一遍训练出的模型。两层是叠加关系，不是替换关系：
+guard model 只会让判断更严格（正则已经拦下的东西不会被它放行），这样接的理由很直接——上面"实测结果"里
+`unsafe`（语气差/不耐烦）这一类正则完全查不出来（两份测试集上都是 0%），这是正则真实缺失的能力，guard
+model 接进去之后这类问题第一次有了检测手段。
+
+这一层默认关闭，是彻底可选的增强，不是硬依赖：
+
+- 没设 `TOWNMIND_USE_GUARD_MODEL` 环境变量，或者没装 `server` 项目的 `guard-model` 可选依赖组
+  （`uv sync --group guard-model`，torch/transformers/peft，几百 MB 到几 GB），或者 `guard/adapters/`
+  下没有训练好的权重——任何一个条件不满足，这一层都会在加载时优雅跳过，服务照常用纯正则规则运行，
+  不会报错、也不会启动失败。
+- 推理是同步、阻塞的调用（CPU 上一次生成可能要几百毫秒到一两秒），`Agent` 里用 `asyncio.to_thread`
+  丢进线程池跑，不会卡住事件循环——不然会跟并发压测那一轮想验证的东西（很多 NPC 能同时被处理）正面冲突。
+- 跨领域上模型准确率只有 68%（见上面"实测结果"里的分析：主要栽在没见过的写法上，不是泛化能力整体差），
+  所以没有让它替代正则、也没有让它自己独立做决定，只让它在正则已经说"没问题"的基础上再加一道检查——
+  就算它偶尔判错，最坏情况也只是多退回几次行为树兜底，不会因为它的误判放过正则本该拦住的内容。
+
+`server/tests/test_guard_model.py` 和 `server/tests/test_agent.py`（"自研防御模型作为可选的第二层"一节）
+测的是这一层"怎么接的"（优雅降级、不阻塞事件循环、正则已拦截时不重复调用），不是模型本身判得准不准——
+准确率数字见上面的评测结果，来自真实权重、真实依赖环境下跑出的 `evaluate.py`。
