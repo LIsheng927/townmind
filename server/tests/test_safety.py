@@ -65,7 +65,11 @@ def test_allowed_items_really_appear_in_world_lore():
     from townmind import world
 
     lore = "\n".join([*world.TOWN_FACTS, *(l.description + "".join(l.facts) for l in world.LOCATIONS)])
-    for w in ("蓝莓松饼", "肉桂卷", "法棍", "面包", "面粉", "铁矿", "矿石", "农具", "刀具"):
+    for w in (
+        "蓝莓松饼", "肉桂卷", "法棍", "面包", "面粉", "麦子",
+        "铁矿", "矿石", "农具", "刀具",
+        "麦酒", "啤酒", "炖肉", "针线", "盐巴", "蜡烛", "陶罐",
+    ):
         assert w in lore, w  # 设定改了、词表没改，就会在这里提醒
 
 

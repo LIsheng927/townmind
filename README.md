@@ -1,7 +1,7 @@
 # TownMind
 
 LLM 驱动的 AI NPC 系统：**Unity 小镇（身体）+ Python Agent 服务端（大脑）**。
-三个 NPC 各有性格、记忆和工作地点，能自主行动、互相对话；大模型不可用时，行为树接管，NPC 依然像样地生活。
+十个 NPC 各有性格、记忆、人际关系和工作地点，能自主行动、互相对话，也会把听来的消息传给别人；大模型不可用时，行为树接管，NPC 依然像样地生活。
 
 ![CI](https://github.com/LIsheng927/townmind/actions/workflows/ci.yml/badge.svg)
 

@@ -5,8 +5,8 @@ using UnityEngine;
 namespace TownMind.World
 {
     /// <summary>
-    /// 用代码搭建小镇：地面 + 3 个方块 NPC + 俯视相机；
-    /// 建筑（面包店、铁匠铺、广场）由服务端在 welcome 消息里下发，收到后再盖。
+    /// 用代码搭建小镇：地面 + 10 个方块 NPC + 俯视相机；
+    /// 建筑（面包店、铁匠铺、广场、磨坊、酒馆、杂货铺）由服务端在 welcome 消息里下发，收到后再盖。
     /// 这样"小镇有哪些地点"只在服务端的 world.py 里维护一份，不会两边不一致。
     /// 挂在和 TownClient 相同的物体上。
     /// </summary>
@@ -26,9 +26,17 @@ namespace TownMind.World
             ground.transform.localScale = new Vector3(2f, 1f, 2f); // Plane 默认 10x10，这里变成 20x20
             ground.GetComponent<Renderer>().material.color = new Color(0.35f, 0.5f, 0.3f);
 
+            // 出生点和服务端 evals/sim.py 里的 START_POSITIONS 保持一致
             Spawn("alice", new Vector3(-3, 0.5f, 0), Color.red);
             Spawn("bob", new Vector3(0, 0.5f, 3), Color.blue);
             Spawn("carol", new Vector3(3, 0.5f, -2), Color.yellow);
+            Spawn("dan", new Vector3(5, 0.5f, 0), new Color(0.6f, 0.3f, 0.1f));
+            Spawn("elsa", new Vector3(-5, 0.5f, 0), new Color(0.9f, 0.6f, 0.2f));
+            Spawn("finn", new Vector3(-1.5f, 0.5f, 4.5f), Color.magenta);
+            Spawn("greta", new Vector3(2, 0.5f, 2), Color.cyan);
+            Spawn("iris", new Vector3(-4, 0.5f, 2), new Color(1f, 0.75f, 0.8f));
+            Spawn("jonas", new Vector3(1, 0.5f, -2), Color.gray);
+            Spawn("milo", new Vector3(-1, 0.5f, -1), Color.green);
             SpawnPlayer(new Vector3(0, 0.5f, -5));
 
             var cam = Camera.main;
