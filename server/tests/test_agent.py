@@ -1,7 +1,7 @@
 import asyncio
 
 from townmind import world
-from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_SAID, Agent, Task
+from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_SAID, Agent, Task, _self_said_text
 from townmind.llm.base import ToolCall
 
 
@@ -480,6 +480,106 @@ def test_guard_model_runs_in_a_thread_not_blocking_event_loop():
     a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=ThreadCheckingGuardModel())
     decide(a)
     assert seen_thread["name"] != threading.main_thread().name
+
+
+# ---------- 幻觉纠正：guard model 核对"自己说过的话"，把抽象的"别轻信记忆"变成针对具体
+# 一条内容的指令（真实评测证实抽象提醒基本没用，见 README"这次尝试"小节） ----------
+class RecordingLLM:
+    """跟 ScriptedLLM 一样按顺序返回预设结果，但连 system 提示词也记下来
+    （ScriptedLLM 只记 user，这里要看 suspect_said 有没有被拼进 system）。"""
+
+    def __init__(self, calls):
+        self.calls = list(calls)
+        self.systems = []
+
+    async def choose_tool(self, system, user, tools):
+        self.systems.append(system)
+        return self.calls.pop(0)
+
+
+def test_self_said_text_extracts_only_the_actual_words():
+    """「自己说过的话」这类记忆固定长 "你[对X]说了「...」"；HEARD 用"对你说：",
+    MET 用"第一次见到"，FAREWELL 用"道别："——格式都不一样，不应该被当成"自己说的话"。"""
+    assert _self_said_text("你对玩家说了「魔法学院要请你去教魔法面包」") == "魔法学院要请你去教魔法面包"
+    assert _self_said_text("你说了「嗯」") == "嗯"  # 附近没人时 to 是空字符串
+    assert _self_said_text("玩家对你说：「你好」") is None
+    assert _self_said_text("你第一次见到玩家") is None
+    assert _self_said_text("你对玩家道别：「再见」") is None
+
+
+def test_suspect_said_memory_gets_flagged_and_injected_into_prompt():
+    clock = FakeClock()
+    llm = RecordingLLM([ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}), ToolCall("idle", {})])
+    # 先给 "ok"：guard model 同时也用来检查大模型刚生成的回复本身（_consult_guard_model）——
+    # 第一轮如果一上来就是 "fabricated"，这句话会被输出检查拦下换成兜底台词，压根不会被
+    # 写成"你对Bob说了「...」"这条自己说的话，第二轮也就没有东西可回忆、可核对了。等第一轮
+    # 顺利把这条记忆写进去之后，再翻成 "fabricated"，才是这条测试真正要测的场景。
+    guard = StubGuardModel("ok")
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard)
+    decide(a)  # alice 说出这句话，写进"你对Bob说了「...」"这条记忆
+    guard.label = "fabricated"
+    clock.t += 7
+    decide(a)  # 第二轮回忆起这条，应该触发 guard model 核对
+    assert ("alice", "魔法学院要请你去教魔法面包") in guard.calls
+    assert "系统核对发现" in llm.systems[1]
+    assert "魔法学院要请你去教魔法面包" in llm.systems[1]
+    assert "这个我好像记错了" in llm.systems[1]  # 示例话术也在，不只是抽象提醒
+
+
+def test_suspect_said_ignores_heard_and_met_memories():
+    """只该拿"自己说的话"去问 guard model，别人说的话、"第一次见到谁"这类记忆
+    不该被当成"我自己可能编的"去核对——guard model 训练的是"NPC 说的话像不像编的"，
+    喂进去别的格式的记忆没有意义，也是在浪费一次推理。"""
+    clock = FakeClock()
+    llm = RecordingLLM([
+        ToolCall("say", {"text": "早上好"}),
+        ToolCall("say", {"text": "嗯"}),
+    ])
+    guard = StubGuardModel("ok")
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard)
+    a.hear_player("你好呀，铁匠", [1.0, 0.0])
+    decide(a)  # 第一次见到Bob + 听到玩家的话 + 自己说了"早上好"，一起写进记忆
+    clock.t += 7
+    decide(a)
+    checked_texts = [text for _, text in guard.calls]
+    assert "早上好" in checked_texts  # 自己说的话：该查
+    assert not any("你好呀" in t for t in checked_texts)  # 玩家说的话：不该查
+    assert not any("第一次见到" in t for t in checked_texts)  # "见到谁"这种记忆：不该查
+
+
+def test_suspect_said_not_checked_when_distrust_own_memory_off():
+    """distrust_own_memory=False 就是"不提醒也不核对自己的记忆"这整件事的开关，
+    guard model 不该单独绕开这个开关被调用去查记忆——但第一轮那次调用是输出检查
+    （_consult_guard_model，跟 distrust_own_memory 无关，回复只要是"say"就会查），
+    不是这条测试要看的东西，所以比较的是"第二轮有没有新增调用"，不是"总共零次调用"。"""
+    clock = FakeClock()
+    llm = RecordingLLM([ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}), ToolCall("idle", {})])
+    guard = StubGuardModel("ok")  # 理由同上一条测试：先让第一轮顺利把这句话写成记忆
+    a = Agent(llm, clock=clock, distrust_own_memory=False, guard_model=guard)
+    decide(a)
+    calls_after_first_turn = list(guard.calls)  # 输出检查那一次，跟这条测试无关
+    guard.label = "fabricated"
+    clock.t += 7
+    decide(a)
+    assert guard.calls == calls_after_first_turn  # 第二轮没有为了核对记忆新增调用
+    assert "系统核对发现" not in llm.systems[1]
+
+
+def test_suspect_said_check_exception_degrades_gracefully():
+    """跟 _consult_guard_model 同一个哲学：这一层的异常不该拖垮决策，也不该让提示词
+    里出现一半拼好、一半没拼好的内容——异常时这条记忆直接跳过，当成没查出问题。"""
+    class BoomGuardModel:
+        def classify(self, npc_id, text):
+            raise RuntimeError("boom")
+
+    clock = FakeClock()
+    llm = RecordingLLM([ToolCall("say", {"text": "魔法学院要请你去教魔法面包"}), ToolCall("idle", {})])
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=BoomGuardModel())
+    decide(a)
+    clock.t += 7
+    result = decide(a)  # 不该抛异常、不该整个决策失败
+    assert result["name"] == "idle"
+    assert "系统核对发现" not in llm.systems[1]
 
 
 # ---------- 伙伴任务：接受委托、搬东西 ----------

@@ -1,17 +1,25 @@
 """幻觉累积评测：NPC 之前编过一句话、侥幸躲过了输出前的检查、被记进了自己的记忆，
-后来玩家追问细节，NPC 是顺着继续编（幻觉累积），还是能借着"自己以前说的话也未必属实"
-这条提醒，主动纠正/否认？
+后来玩家追问细节，NPC 是顺着继续编（幻觉累积），还是能主动纠正/否认？
 
 对照的是 agent.py 里 distrust_own_memory 这个开关：
   old_prompt（distrust_own_memory=False）：修复前的提示词，只提醒"别人说的话未必属实"
-  new_prompt（distrust_own_memory=True） ：修复后的提示词，也提醒"自己以前说的话未必属实"
+  new_prompt（distrust_own_memory=True） ：修复后的提示词 + guard model 结构性核对
+    （guard model 可用时）——早两版 new_prompt 靠的是一句通用提醒"自己说的话也未必属实"，
+    真实数据测出来基本没用（历史结果：54%/0%/46% vs 56%/2%/42%，两个配置几乎没差）；
+    这一版换了机制：回忆里"自己说过的话"先用已训练好的 guard 分类器单独核对一遍
+    （townmind.agent._flag_suspect_said_memories），判定是编造的，才在这一轮提示词里
+    针对这条具体内容给出明确指令，而不是靠模型自己记得"要留个心眼"这条抽象规则。
 
 跟 evals/probes.py 的区别：probes.py 测的是"当场编不编"，这里测的是"已经编过一次、
 写进了记忆之后，面对追问会不会在这个基础上继续编"——也就是幻觉累积这条链路本身。
 
+guard model 是可选依赖（`uv sync --group guard-model`）：没装的话 new_prompt 会自动退回
+只有提示词、没有结构性核对的旧行为（Agent 那边本来就是"没配 guard_model 就跳过"的优雅
+退化），表格上会打印一行提示，不会报错。
+
 用法（在 server 目录下）：
   uv run python -m evals.hallucination_recall --llm offline
-  uv run python -m evals.hallucination_recall --llm real --repeats 5
+  uv run python -m evals.hallucination_recall --llm real --repeats 12
 """
 import argparse
 import asyncio
@@ -21,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from townmind.agent import Agent, IMPORTANCE_SAID, SpeechEvent
+from townmind.guard_model import GuardModel
 from townmind.llm.factory import make_client
 from townmind.personas import PERSONAS
 
@@ -79,11 +88,17 @@ def judge(text: str, continue_keywords: tuple[str, ...]) -> str:
     return "unclear"
 
 
-async def ask_once(npc_id: str, fabricated: str, question: str, distrust_own_memory: bool, llm, seed: int) -> dict:
+async def ask_once(
+    npc_id: str, fabricated: str, question: str, distrust_own_memory: bool, llm, seed: int,
+    guard_model: GuardModel | None = None,
+) -> dict:
     clock = SimClock()
     agent = Agent(
         llm, clock=clock, rng=random.Random(seed),
         use_memory=True, use_lore=True, distrust_own_memory=distrust_own_memory,
+        # old_prompt 完全不带 guard_model，保持跟历史基线一致的对照组；new_prompt 才用它——
+        # 结构性核对本来就是 distrust_own_memory 这件事的延伸，两者绑在一起测
+        guard_model=guard_model if distrust_own_memory else None,
     )
     pos = (0.0, 0.0)
     PERSONAS.setdefault("player", {"name": "玩家", "persona": "", "home": ""})
@@ -103,18 +118,20 @@ async def run(llm_kind: str, repeats: int) -> tuple[dict, list[dict]]:
     llm = OfflineLLM() if llm_kind == "offline" else make_client()
     if llm is None:
         raise SystemExit("没有可用的大模型：请检查 server/.env 里 provider 和对应的 key 是否匹配。")
+    guard = GuardModel()
+    guard_ready = guard.available  # 没装可选依赖/没有训练好的 adapter 时优雅退化，不报错
     rows: list[dict] = []
     for cfg, distrust in CONFIGS.items():
         for npc, fabricated, question, kws in SCENARIOS:
             for i in range(repeats):
-                action = await ask_once(npc, fabricated, question, distrust, llm, seed=i)
+                action = await ask_once(npc, fabricated, question, distrust, llm, seed=i, guard_model=guard)
                 text = action.get("text", "") if action["name"] == "say" else ""
                 verdict = judge(text, kws) if text else "unclear"
                 rows.append({
                     "config": cfg, "npc": npc, "fabricated": fabricated, "question": question,
                     "text": text, "action": action["name"], "source": action["source"], "verdict": verdict,
                 })
-    return summarize(rows), rows
+    return summarize(rows) | {"guard_model_available": guard_ready}, rows
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -129,13 +146,19 @@ def summarize(rows: list[dict]) -> dict:
 
 
 def render_table(summary: dict) -> str:
+    note = (
+        "\n（guard model 不可用：new_prompt 这次只测了提示词本身，没有结构性核对——"
+        "`uv sync --group guard-model` 装上可选依赖再跑一次，能看到完整效果）"
+        if not summary["guard_model_available"]
+        else ""
+    )
     lines = ["| 配置 | 顺着继续编（幻觉累积，越低越好） | 主动纠正/否认（越高越好） | 含糊带过 |", "|---|---|---|---|"]
     for cfg in CONFIGS:
         lines.append(
             f"| {cfg} | {summary[f'{cfg}/reinforced']:.0%} "
             f"| {summary[f'{cfg}/corrected']:.0%} | {summary[f'{cfg}/unclear']:.0%} |"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + note
 
 
 def render_answers(rows: list[dict]) -> str:
