@@ -10,6 +10,10 @@ dependencies = [
     "anthropic>=0.40",
     "openai>=1.50",
     "python-dotenv>=1.0",
+    # 记忆检索的向量化快路径（memory.py 里余弦相似度改成一次矩阵乘）。代码里是
+    # try/except 可选导入、没装会自动退回纯 Python，但默认就该装上：不装的话
+    # 同样的检索慢一两百倍，属于那种不报错、只是悄悄变卡的性能悬崖。
+    "numpy>=1.24",
 ]
 
 [dependency-groups]
