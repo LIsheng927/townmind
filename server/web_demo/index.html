@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>TownMind 伙伴 Demo</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; display: flex; height: 100vh; background: #f4f1ea; }
+  #left { flex: 0 0 auto; padding: 16px; }
+  #right { flex: 1 1 auto; padding: 16px; display: flex; flex-direction: column; min-width: 320px; }
+  canvas { background: #eae3d3; border: 2px solid #6b5b3d; border-radius: 6px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  #help { font-size: 13px; color: #555; line-height: 1.6; margin-bottom: 12px; white-space: pre-line; }
+  #conn { font-size: 13px; margin-bottom: 8px; }
+  #conn.ok { color: #2a7a2a; }
+  #conn.bad { color: #b33; }
+  #status { font-size: 13px; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; margin-bottom: 12px; line-height: 1.7; }
+  #status b { color: #333; }
+  #log { flex: 1 1 auto; overflow-y: auto; background: #fff; border: 1px solid #ddd; border-radius: 6px; padding: 10px; font-size: 13px; line-height: 1.6; }
+  #log .npc { color: #1a5b8a; }
+  #log .me { color: #a05a00; }
+  #log .sys { color: #888; font-style: italic; }
+  #inputRow { display: flex; gap: 6px; margin-top: 10px; }
+  #inputRow input { flex: 1; padding: 8px; font-size: 14px; border: 1px solid #ccc; border-radius: 4px; }
+  #inputRow button { padding: 8px 14px; font-size: 14px; border: none; border-radius: 4px; background: #4a7c4a; color: #fff; cursor: pointer; }
+  #inputRow button:hover { background: #3a6a3a; }
+  .bubble { position: absolute; background: #fff; border: 1px solid #333; border-radius: 8px; padding: 2px 6px; font-size: 12px; pointer-events: none; transform: translate(-50%, -140%); white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div id="left">
+  <h1>TownMind 伙伴 Demo</h1>
+  <div id="help">这是个纯网页小工具，不是 Unity——只是为了能亲眼看到 agent 的决策过程，
+不用装 Unity 也能玩。它直接连你本机跑起来的服务端，用的是真实的大模型（如果你配了 key）。
+
+先在另一个终端启动服务端：
+  cd server
+  uv run uvicorn townmind.main:app --port 8000
+
+方向键 / WASD 移动蓝色的"你"。伙伴是绿色的 Alice。
+下面输入框可以对 Alice 说话，试试：
+  "跟着我"
+  "帮我把铁剑搬到广场"
+  "帮我把剑搬到广场"（故意说得含糊，看她是不是会反问是哪把剑）
+</div>
+<div id="conn" class="bad">未连接</div>
+<canvas id="map" width="520" height="520"></canvas>
+</div>
+
+<div id="right">
+  <div id="status">连接后显示 Alice 的状态…</div>
+  <div id="log"></div>
+  <div id="inputRow">
+    <input id="textInput" type="text" placeholder="对 Alice 说点什么…" />
+    <button id="sendBtn">发送</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ---------- 配置 ----------
+const WS_URL = "ws://localhost:8000/ws";
+const COMPANION_ID = "alice";
+const WORLD_HALF = 8.0;          // 跟 townmind/policy.py 的 WORLD_HALF_SIZE 对齐
+const CANVAS_SIZE = 520;
+const WALK_SPEED = 2.5;          // 米/秒，跟 evals/sim.py 里 Unity 走路速度保持一致
+const OBSERVE_INTERVAL_MS = 2000;// 多久帮 Alice 问一次"接下来做什么"——简化：固定轮询，
+                                  // 不像真正的 Unity 客户端那样"走到才问"，够用来看效果了
+const STATUS_POLL_MS = 1000;
+const MOVE_STEP = 0.15;          // 玩家每次按键挪动的距离
+
+// ---------- 坐标转换：世界坐标 [-8,8] <-> 画布像素 ----------
+function toCanvas(x, z) {
+  const px = (x + WORLD_HALF) / (WORLD_HALF * 2) * CANVAS_SIZE;
+  const py = (WORLD_HALF - z) / (WORLD_HALF * 2) * CANVAS_SIZE; // z 轴朝上画
+  return [px, py];
+}
+
+// ---------- 状态 ----------
+let ws = null;
+let locations = [];
+let items = [];
+let player = { x: 0, z: -2 };
+let companion = { x: -2, z: 0, target: null, targetSetAt: 0, fromX: -2, fromZ: 0 };
+let companionBubble = null; // {text, until}
+let lastStatus = null;
+
+const canvas = document.getElementById("map");
+const ctx = canvas.getContext("2d");
+const logEl = document.getElementById("log");
+const statusEl = document.getElementById("status");
+const connEl = document.getElementById("conn");
+
+function log(cls, text) {
+  const line = document.createElement("div");
+  line.className = cls;
+  const t = new Date().toLocaleTimeString();
+  line.textContent = `[${t}] ${text}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ---------- 绘制 ----------
+function draw() {
+  ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+
+  // 地点
+  ctx.font = "12px sans-serif";
+  for (const loc of locations) {
+    const [px, py] = toCanvas(loc.x, loc.z);
+    ctx.fillStyle = "#c9b98a";
+    ctx.fillRect(px - 22, py - 16, 44, 32);
+    ctx.strokeStyle = "#6b5b3d";
+    ctx.strokeRect(px - 22, py - 16, 44, 32);
+    ctx.fillStyle = "#333";
+    ctx.textAlign = "center";
+    ctx.fillText(loc.name, px, py + 30);
+  }
+
+  // 物品
+  for (const it of items) {
+    const [px, py] = toCanvas(it.x, it.z);
+    ctx.fillStyle = "#a33";
+    ctx.beginPath();
+    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.fillText(it.name, px, py - 10);
+  }
+
+  // 玩家
+  {
+    const [px, py] = toCanvas(player.x, player.z);
+    ctx.fillStyle = "#2a5ea8";
+    ctx.beginPath();
+    ctx.arc(px, py, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.fillText("你", px, py - 14);
+  }
+
+  // 伙伴
+  {
+    const [px, py] = toCanvas(companion.x, companion.z);
+    ctx.fillStyle = "#3a8a3a";
+    ctx.beginPath();
+    ctx.arc(px, py, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.fillText("Alice" + (lastStatus && lastStatus.following ? "（跟随中）" : ""), px, py - 14);
+    if (companionBubble && Date.now() < companionBubble.until) {
+      ctx.fillStyle = "#fff";
+      ctx.strokeStyle = "#333";
+      const w = ctx.measureText(companionBubble.text).width + 12;
+      ctx.fillRect(px - w / 2, py - 42, w, 20);
+      ctx.strokeRect(px - w / 2, py - 42, w, 20);
+      ctx.fillStyle = "#000";
+      ctx.fillText(companionBubble.text, px, py - 28);
+    }
+  }
+
+  requestAnimationFrame(animate);
+}
+
+let lastFrameTime = performance.now();
+function animate(now) {
+  const dt = Math.min(0.1, (now - lastFrameTime) / 1000);
+  lastFrameTime = now;
+  if (companion.target) {
+    const dx = companion.target.x - companion.x;
+    const dz = companion.target.z - companion.z;
+    const dist = Math.hypot(dx, dz);
+    const step = WALK_SPEED * dt;
+    if (dist <= step || dist < 0.01) {
+      companion.x = companion.target.x;
+      companion.z = companion.target.z;
+      companion.target = null;
+    } else {
+      companion.x += (dx / dist) * step;
+      companion.z += (dz / dist) * step;
+    }
+  }
+  draw();
+}
+
+// ---------- WebSocket ----------
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    connEl.textContent = "已连接，正在打招呼…";
+    connEl.className = "ok";
+    send({ type: "hello" });
+  };
+  ws.onclose = () => {
+    connEl.textContent = "连接断开，5 秒后重试…（服务端启动了吗？uv run uvicorn townmind.main:app --port 8000）";
+    connEl.className = "bad";
+    setTimeout(connect, 5000);
+  };
+  ws.onerror = () => { /* onclose 会跟着触发，这里不重复处理 */ };
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    handleMessage(msg);
+  };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function handleMessage(msg) {
+  if (msg.type === "welcome") {
+    locations = msg.payload.locations || [];
+    items = msg.payload.items || [];
+    connEl.textContent = `已连接（server ${msg.payload.version || "?"}）`;
+    log("sys", "已连接服务端，地图加载完成。");
+    sendPlayerPosition();
+    requestObservation();
+    setInterval(requestObservation, OBSERVE_INTERVAL_MS);
+    setInterval(requestStatus, STATUS_POLL_MS);
+  } else if (msg.type === "action" && msg.npc_id === COMPANION_ID) {
+    applyCompanionAction(msg.payload);
+  } else if (msg.type === "status" && msg.npc_id === COMPANION_ID) {
+    lastStatus = msg.payload;
+    renderStatus();
+  } else if (msg.type === "error") {
+    log("sys", "服务端报错：" + JSON.stringify(msg.payload));
+  }
+}
+
+function applyCompanionAction(action) {
+  if (action.name === "move_to") {
+    companion.target = { x: action.x, z: action.z };
+  } else if (action.name === "say") {
+    companionBubble = { text: action.text, until: Date.now() + 3000 };
+    log("npc", "Alice：" + action.text);
+  } else if (action.name === "idle") {
+    // 什么都不用画，等下一轮
+  }
+}
+
+function renderStatus() {
+  if (!lastStatus) return;
+  const following = lastStatus.following ? "是" : "否";
+  const holding = lastStatus.holding ? lastStatus.holding : "（空手）";
+  const task = lastStatus.task ? `把「${lastStatus.task.item}」送到「${lastStatus.task.destination}」` : "（没有任务）";
+  statusEl.innerHTML =
+    `<b>跟随中：</b>${following}　<b>手上拿着：</b>${holding}<br/><b>当前任务：</b>${task}`;
+}
+
+function requestObservation() {
+  send({ type: "observation", npc_id: COMPANION_ID, payload: { pos: [companion.x, companion.z] } });
+}
+function requestStatus() {
+  send({ type: "status_query", npc_id: COMPANION_ID, payload: {} });
+}
+let lastPosSent = 0;
+function sendPlayerPosition() {
+  const now = Date.now();
+  if (now - lastPosSent < 150) return; // 简单节流，别刷太快
+  lastPosSent = now;
+  send({ type: "position", npc_id: "player", payload: { pos: [player.x, player.z] } });
+}
+
+// ---------- 玩家操控 ----------
+const keys = new Set();
+window.addEventListener("keydown", (e) => { keys.add(e.key.toLowerCase()); });
+window.addEventListener("keyup", (e) => { keys.delete(e.key.toLowerCase()); });
+
+function movePlayerLoop() {
+  let dx = 0, dz = 0;
+  if (keys.has("arrowup") || keys.has("w")) dz += 1;
+  if (keys.has("arrowdown") || keys.has("s")) dz -= 1;
+  if (keys.has("arrowleft") || keys.has("a")) dx -= 1;
+  if (keys.has("arrowright") || keys.has("d")) dx += 1;
+  if (dx || dz) {
+    const norm = Math.hypot(dx, dz) || 1;
+    player.x = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.x + (dx / norm) * MOVE_STEP));
+    player.z = Math.max(-WORLD_HALF, Math.min(WORLD_HALF, player.z + (dz / norm) * MOVE_STEP));
+    sendPlayerPosition();
+  }
+  requestAnimationFrame(movePlayerLoop);
+}
+
+// ---------- 发指令 ----------
+document.getElementById("sendBtn").addEventListener("click", sendText);
+document.getElementById("textInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendText();
+});
+function sendText() {
+  const input = document.getElementById("textInput");
+  const text = input.value.trim();
+  if (!text) return;
+  send({ type: "player_say", payload: { text, pos: [player.x, player.z] } });
+  log("me", "你：" + text);
+  input.value = "";
+}
+
+// ---------- 启动 ----------
+requestAnimationFrame(movePlayerLoop);
+requestAnimationFrame(animate);
+connect();
+</script>
+</body>
+</html>

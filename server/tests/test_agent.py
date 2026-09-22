@@ -1,6 +1,7 @@
 import asyncio
 
-from townmind.agent import Agent
+from townmind import world
+from townmind.agent import Agent, Task
 from townmind.llm.base import ToolCall
 
 
@@ -479,3 +480,330 @@ def test_guard_model_runs_in_a_thread_not_blocking_event_loop():
     a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), guard_model=ThreadCheckingGuardModel())
     decide(a)
     assert seen_thread["name"] != threading.main_thread().name
+
+
+# ---------- 伙伴任务：接受委托、搬东西 ----------
+# 玩家说的话现在不只是聊天，也可能变成真实动作了，所以这里重点测两件事：
+# 1) 物理事实（在哪、手上拿没拿着）由代码核实，不采信大模型自己说"捡起来了/送到了"；
+# 2) 物品/地点必须是真实存在的白名单，不能让大模型自己编一个。
+SMITHY_ITEM_POS = (6.0, 3.0)  # 铁剑的出生点，紧挨着铁匠铺
+PLAZA_POS = (0.0, -4.0)  # 广场
+
+
+def test_start_fetch_task_sets_goal_and_gives_a_code_written_ack():
+    """确认的话是代码拼的（f-string），不是大模型现场编的——不存在"答应了根本没有的事"这种风险。"""
+    a = Agent(FakeLLM(ToolCall("start_fetch_task", {"item": "铁剑", "destination": "广场"})))
+    a.hear_player("帮我把铁剑搬到广场好吗？", [1.0, 0.0])
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert a.tasks["alice"] == Task(owner="player", item="铁剑", destination="广场")
+    assert r == {"name": "say", "text": "好，我这就去把铁剑送到广场。"}
+
+
+def test_fetch_task_item_must_be_a_real_item_name():
+    """镇上明明有"铁剑"和"银剑"两把剑，大模型如果自己编一个笼统的"剑"，
+    校验应该直接拒绝——这跟 go_to 只能选真实地点是同一个白名单机制。"""
+    a = Agent(FakeLLM(ToolCall("start_fetch_task", {"item": "剑", "destination": "广场"})))
+    a.hear_player("帮我把剑搬到广场", [1.0, 0.0])
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" not in a.tasks  # 校验没过，没有变成一个"送错东西"的任务
+    # 校验失败 -> 行为树兜底，跟别的工具编错参数时一样的处理；因为刚"听到"玩家说话，
+    # 行为树走的是"回应"分支（不是打招呼），所以这里跟 is_bt_greeting 对比的台词不一样
+    assert r["name"] == "say" and r["text"] in ("哎呀，你说得对！要不要来块面包？", "是吗？慢慢说，先尝尝我的面包。")
+
+
+def test_active_task_keeps_deciding_even_with_nobody_around():
+    """手头有任务时，就算旁边没人、也没人跟它说话，也不该傻站着——每次还是要接着往下推进。"""
+    llm = ScriptedLLM([ToolCall("go_to", {"place": "铁匠铺"})])
+    a = Agent(llm)
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))  # 故意不加邻居，也不 hear_player
+    assert r["name"] == "move_to" and r["place"] == "铁匠铺"  # 真的问了大模型、不是傻等/瞎逛
+
+
+def test_pick_up_rejected_when_not_near_the_item():
+    """人还在老远的地方，大模型却说"捡起来了"——不采信，改成先带它往东西那儿走。"""
+    a = Agent(ScriptedLLM([ToolCall("pick_up_item", {})]))
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))  # 离铁剑很远
+    assert "alice" not in a.holding
+    assert r["name"] == "move_to"  # 纠正成"往东西那边走"，而不是卡住或者假装成功
+    assert a.stats["pick_up_rejected"] == 1
+
+
+def test_pick_up_succeeds_when_actually_near_the_item():
+    a = Agent(ScriptedLLM([ToolCall("pick_up_item", {})]))
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    r = asyncio.run(a.decide("alice", {"pos": list(SMITHY_ITEM_POS)}))
+    assert a.holding["alice"] == "铁剑"
+    assert r == {"name": "say", "text": "捡起铁剑了。"}
+    assert a.stats["items_picked_up"] == 1
+
+
+def test_put_down_at_destination_completes_the_task():
+    """任务算不算完成，由代码核实"当前地点 == 任务目的地、东西也对得上"，不采信大模型自称"送到了"。"""
+    a = Agent(ScriptedLLM([ToolCall("put_down_item", {})]))
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    a.holding["alice"] = "铁剑"
+    r = asyncio.run(a.decide("alice", {"pos": list(PLAZA_POS)}))
+    assert "alice" not in a.tasks  # 任务完成，清掉了
+    assert "alice" not in a.holding
+    assert r == {"name": "say", "text": "铁剑送到广场啦！"}
+    assert a.stats["fetch_tasks_completed"] == 1
+
+
+def test_put_down_off_target_keeps_the_task_open():
+    a = Agent(ScriptedLLM([ToolCall("put_down_item", {})]))
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    a.holding["alice"] = "铁剑"
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))  # 不是广场
+    assert "alice" in a.tasks  # 没送对地方，任务还没结束
+    assert "alice" not in a.holding  # 但东西确实放下了（放在了错的地方）
+    assert a.item_pos["铁剑"] == (0.0, 0.0)
+    assert r["name"] == "say"
+    assert a.stats["items_dropped_off_target"] == 1
+
+
+def test_ask_clarification_becomes_say_and_does_not_start_a_task():
+    a = Agent(FakeLLM(ToolCall("ask_clarification", {"text": "你说的是铁剑还是银剑呀？"})))
+    a.hear_player("帮我把剑搬到广场", [1.0, 0.0])
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert r == {"name": "say", "text": "你说的是铁剑还是银剑呀？"}
+    assert "alice" not in a.tasks
+
+
+def test_prompt_tells_idle_npc_the_real_item_names_and_to_ask_when_unsure():
+    llm = FakeLLM(ToolCall("idle", {}))
+    decide(Agent(llm))
+    assert "铁剑" in llm.last_system and "银剑" in llm.last_system and "面包篮" in llm.last_system
+    assert "ask_clarification" in llm.last_system
+
+
+def test_prompt_tells_busy_npc_to_finish_the_task_first():
+    llm = FakeLLM(ToolCall("idle", {}))
+    a = Agent(llm)
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "先把这件事做完" in llm.last_system
+
+
+def test_prompt_shows_task_progress_not_holding():
+    llm = FakeLLM(ToolCall("idle", {}))
+    a = Agent(llm)
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "把「铁剑」送到「广场」" in llm.last_user
+    assert "手上还没拿东西" in llm.last_user
+
+
+def test_prompt_shows_task_progress_while_holding():
+    llm = FakeLLM(ToolCall("idle", {}))
+    a = Agent(llm)
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    a.holding["alice"] = "铁剑"
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "手里正拿着「铁剑」" in llm.last_user
+
+
+# ---------- 伙伴任务：反问之后不能"失忆" ----------
+# 实测发现的真bug：给大模型的 prompt 里"你刚听到"只包含这一轮新说的话，不会带完整聊天记录。
+# 玩家说"帮我把剑搬到广场" -> Alice 反问"铁剑还是银剑" -> 玩家答"铁剑"：如果代码不把"我问过
+# 什么"这件事记下来、显式塞回下一轮 prompt，Alice 面对孤零零一句"铁剑"就接不上上下文，
+# 会反复重复同一个问题，最后甚至道别把任务丢了。下面这组测试盯的就是这条状态是否被正确维护。
+def test_ask_clarification_records_pending_text():
+    a = Agent(FakeLLM(ToolCall("ask_clarification", {"text": "你说的是铁剑还是银剑呀？"})))
+    a.hear_player("帮我把剑搬到广场", [1.0, 0.0])
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert a.pending_clarification["alice"] == "你说的是铁剑还是银剑呀？"
+
+
+def test_start_fetch_task_clears_pending_clarification():
+    """反问有了着落（接成了任务），之前那句"还在等回答"就不用再提了。"""
+    a = Agent(FakeLLM(ToolCall("start_fetch_task", {"item": "铁剑", "destination": "广场"})))
+    a.pending_clarification["alice"] = "你说的是铁剑还是银剑呀？"
+    a.hear_player("铁剑", [1.0, 0.0])
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" not in a.pending_clarification
+
+
+def test_end_conversation_clears_pending_clarification():
+    """道别、放弃了这次对话，之前问出去的问题也不用再等了。"""
+    a = Agent(FakeLLM(ToolCall("end_conversation", {"farewell": "我先去忙啦，再见！"})))
+    a.pending_clarification["alice"] = "你说的是铁剑还是银剑呀？"
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" not in a.pending_clarification
+
+
+def test_prompt_reminds_npc_of_unanswered_question_when_nobody_replied_yet():
+    llm = FakeLLM(ToolCall("idle", {}))
+    a = Agent(llm)
+    a.pending_clarification["alice"] = "你说的是铁剑还是银剑呀？"
+    decide(a, "alice", {"pos": [0.0, 0.0]})  # 没有 hear_player，这一轮没有新听到的话
+    assert "你说的是铁剑还是银剑呀？" in llm.last_user
+    assert "不要又重复问一遍" in llm.last_user
+
+
+def test_prompt_tells_npc_to_use_the_reply_when_pending_and_heard_something_new():
+    llm = FakeLLM(ToolCall("start_fetch_task", {"item": "铁剑", "destination": "广场"}))
+    a = Agent(llm)
+    a.pending_clarification["alice"] = "你说的是铁剑还是银剑呀？"
+    a.hear_player("铁剑", [1.0, 0.0])
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "你说的是铁剑还是银剑呀？" in llm.last_user
+    assert "现在ta回复了" in llm.last_user
+
+
+def test_idle_npc_is_offered_task_tools_but_busy_npc_is_not():
+    """闲着的时候能看到 start_fetch_task 这个选项；已经在忙的时候不该再看到它
+    （不然大模型有可能中途又接一个新任务，把手头的任务丢在一半）。"""
+    seen = {}
+
+    class Spy(FakeLLM):
+        async def choose_tool(self, system, user, tools):
+            seen["names"] = {t["name"] for t in tools}
+            return ToolCall("idle", {})
+
+    a = Agent(Spy())
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "start_fetch_task" in seen["names"] and "pick_up_item" not in seen["names"]
+
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert "start_fetch_task" not in seen["names"] and "pick_up_item" in seen["names"]
+
+
+# ---------- 伙伴任务：跟随 ----------
+def test_follow_player_sets_following_and_acks():
+    a = Agent(FakeLLM(ToolCall("follow_player", {})))
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" in a.following
+    assert r == {"name": "say", "text": "好，我跟着你。"}
+
+
+def test_stop_follow_clears_following():
+    a = Agent(FakeLLM(ToolCall("stop_follow", {})))
+    a.following.add("alice")
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "alice" not in a.following
+    assert r == {"name": "say", "text": "好，那我先不跟着你了。"}
+
+
+def test_follow_step_moves_toward_player_when_far():
+    """跟随本身走的是规则（不调用大模型），直接测这个方法本身：
+    玩家离得远，就往玩家那边挪，但停在离玩家一小段距离的地方，不叠在玩家身上。
+    （注意：这个方法只在 decide() 判断"没什么特别的事发生"时才会被调用——玩家如果就站在
+    旁边，NEARBY_RADIUS 内会触发"有人在附近"，改走问大模型那条分支，这是符合预期的：
+    人在眼前时应该让大模型决定要不要顺便聊两句，而不是闷头用几何规则挪位置。）"""
+    a = Agent(None)
+    a.following.add("alice")
+    a.positions["alice"] = (0.0, 0.0)
+    a.positions["player"] = (10.0, 0.0)
+    r = a._follow_step("alice")
+    assert r["name"] == "move_to"
+    assert 0.0 < r["x"] < 10.0  # 往玩家方向挪了，但没有直接跳到玩家脚下
+    assert abs((10.0 - r["x"]) - 1.5) < 0.01  # 刚好停在离玩家 FOLLOW_STAND_OFFSET 远的地方
+
+
+def test_follow_step_idles_when_already_close_to_player():
+    a = Agent(None)
+    a.following.add("alice")
+    a.positions["alice"] = (0.0, 0.0)
+    a.positions["player"] = (1.0, 0.0)  # 已经很近了
+    assert a._follow_step("alice") == {"name": "idle", "seconds": 1.0}
+
+
+def test_follow_step_falls_back_to_wandering_when_player_position_unknown():
+    a = Agent(None)
+    a.following.add("alice")
+    a.positions["alice"] = (0.0, 0.0)
+    r = a._follow_step("alice")  # 压根没设置过玩家的位置
+    assert r["name"] in ("idle", "move_to")  # 走的是 _wander，不会报错、也不会瞎猜玩家在哪
+
+
+def test_idle_tools_swap_follow_player_for_stop_follow_once_following():
+    seen = {}
+
+    class Spy(FakeLLM):
+        async def choose_tool(self, system, user, tools):
+            seen["names"] = {t["name"] for t in tools}
+            return ToolCall("idle", {})
+
+    a = Agent(Spy())
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "follow_player" in seen["names"] and "stop_follow" not in seen["names"]
+
+    a.following.add("alice")
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "stop_follow" in seen["names"] and "follow_player" not in seen["names"]
+
+
+def test_prompt_mentions_currently_following():
+    llm = FakeLLM(ToolCall("idle", {}))
+    a = Agent(llm)
+    a.following.add("alice")
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert "你正在跟着玩家走" in llm.last_user
+    assert "stop_follow" in llm.last_system
+
+
+# ---------- 记忆的语义检索：embedder 是可选依赖，跟 guard_model 同一套"鸭子类型 + 优雅退化" ----------
+class FakeEmbedder:
+    """确定性的假 embedding，不用真的调用 OpenAI：按几个关键词是否出现在文字里，映射成向量的
+    某一维。也记录每次被调用时收到的文字列表，方便断言"到底有没有真的发过请求、发了几次"。"""
+
+    KEYWORDS = ("剑", "面包", "天气")
+
+    def __init__(self, exc=None):
+        self.exc = exc
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts):
+        self.calls.append(list(texts))
+        if self.exc:
+            raise self.exc
+        return [[1.0 if kw in t else 0.0 for kw in self.KEYWORDS] for t in texts]
+
+
+def test_new_memories_get_embedded_in_one_batched_call():
+    embedder = FakeEmbedder()
+    a = Agent(FakeLLM(ToolCall("say", {"text": "要不要来块面包？"})), embedder=embedder)
+    a.hear_player("这把剑真好看", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    # 一次是回忆用的 query embedding（只有一段文字），一次是这一轮新记忆的批量 embedding——
+    # 不管这一轮新增了几条记忆，都该在一次网络请求里一起算完，不是每条各发一次
+    assert len(embedder.calls) == 2
+    query_call, batch_call = embedder.calls
+    assert len(query_call) == 1
+    assert len(batch_call) >= 2  # 至少"听到的话"和"自己说的话"这两条
+    assert any("剑" in t for t in batch_call) and any("面包" in t for t in batch_call)
+    stored = {m.text: m.embedding for m in a._mem("alice").memories}
+    assert any(emb == (1.0, 0.0, 0.0) for emb in stored.values())  # 含"剑"的那条，向量对应关键词维度（MemoryStore.add 存成 tuple）
+
+
+def test_no_embedding_calls_when_nothing_heard_or_nearby():
+    """手头有任务、但没人搭话没人围观的这种"安静推进任务"场景，不该产生任何 embedding 网络请求
+    （回忆的查询文本是空的，也没有新记忆要写）。"""
+    embedder = FakeEmbedder()
+    llm = ScriptedLLM([ToolCall("go_to", {"place": "铁匠铺"})])
+    a = Agent(llm, embedder=embedder)
+    a.tasks["alice"] = Task(owner="player", item="铁剑", destination="广场")
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert embedder.calls == []
+
+
+def test_embedding_failure_falls_back_gracefully_without_crashing_decide():
+    """embedding 接口挂了（额度、网络、超时……），不该拖垮决策或者记忆写入，
+    只是这条记忆的 embedding 会是 None（相关度退化成旧公式）。"""
+    embedder = FakeEmbedder(exc=RuntimeError("quota exceeded"))
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})), embedder=embedder)
+    a.hear_player("你好", [1.0, 0.0])
+    r = decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert r["name"] == "say"  # 决策本身没受影响
+    assert all(m.embedding is None for m in a._mem("alice").memories)
+
+
+def test_no_embedder_configured_never_calls_anything_and_behaves_like_before():
+    """默认不传 embedder（等价于没配 OPENAI_API_KEY）：跟这个功能加之前的行为完全一样。"""
+    a = Agent(FakeLLM(ToolCall("say", {"text": "你好呀"})))
+    a.hear_player("你好", [1.0, 0.0])
+    decide(a, "alice", {"pos": [0.0, 0.0]})
+    assert all(m.embedding is None for m in a._mem("alice").memories)

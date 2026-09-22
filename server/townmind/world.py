@@ -80,11 +80,41 @@ TOWN_FACTS: tuple[str, ...] = (
     "旅行商人 Carol 刚到小镇不久，还不太熟悉这里。",
 )
 
+
+@dataclass(frozen=True)
+class Item:
+    """伙伴 NPC 能帮玩家搬运的东西。只记出生位置——捡起来之后东西在哪，
+    由 Agent 动态维护（跟着拿它的人走，放下了就停在放下的地方），不属于"世界设定"这种静态事实。"""
+
+    id: str
+    name: str
+    x: float
+    z: float
+    description: str
+
+
+ITEMS: tuple[Item, ...] = (
+    # 铁剑/银剑故意起了容易混淆的名字：玩家只说"剑"的时候，伙伴该反问是哪一把，而不是瞎猜
+    Item(id="sword_iron", name="铁剑", x=6.0, z=3.0, description="铁匠铺门口刚打好的一把铁剑。"),
+    Item(id="sword_silver", name="银剑", x=6.5, z=3.0, description="铁匠铺门口另一把镶银的剑，是镇长定做的。"),
+    Item(id="bread_basket", name="面包篮", x=-6.0, z=3.0, description="面包店门口装面包用的藤条篮子。"),
+)
+
 _BY_NAME = {loc.name: loc for loc in LOCATIONS}
+_ITEMS_BY_NAME = {i.name: i for i in ITEMS}
 
 
 def get_location(name: str) -> Location | None:
     return _BY_NAME.get(name)
+
+
+def get_item(name: str) -> Item | None:
+    return _ITEMS_BY_NAME.get(name)
+
+
+def is_near(a: tuple[float, float], b: tuple[float, float], radius: float = AT_RADIUS) -> bool:
+    """通用的"离得够近"判断，捡/放东西的前置条件检查用得到，跟地点判断共用同一个半径。"""
+    return math.dist(a, b) <= radius
 
 
 def nearest_location(pos: tuple[float, float]) -> tuple[Location, float]:
@@ -118,3 +148,8 @@ def describe_surroundings(pos: tuple[float, float]) -> list[str]:
 def locations_payload() -> list[dict]:
     """发给 Unity 的地点列表（Unity 据此在场景里盖房子）。"""
     return [{"id": l.id, "name": l.name, "x": l.x, "z": l.z, "kind": l.kind} for l in LOCATIONS]
+
+
+def items_payload() -> list[dict]:
+    """发给 Unity 的物品列表（Unity 据此在场景里摆放可搬运的物件）。"""
+    return [{"id": i.id, "name": i.name, "x": i.x, "z": i.z} for i in ITEMS]

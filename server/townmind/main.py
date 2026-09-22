@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from . import world
 from .agent import Agent
 from .guard_model import ENV_ENABLE, GuardModel
+from .llm.embeddings import make_embedder
 from .llm.factory import make_client
 from .protocol import Envelope
 
@@ -22,7 +23,10 @@ DATA_DIR = Path(os.getenv("TOWNMIND_DATA_DIR") or Path(__file__).resolve().paren
 # 没装可选依赖（uv sync --group guard-model）、或者没有训练好的 adapter，都会在真正用到时
 # 优雅跳过，不影响服务启动，所以这里可以放心地无条件构造 GuardModel()。
 _guard_model = GuardModel() if os.getenv(ENV_ENABLE) else None
-app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories", guard_model=_guard_model)
+# 语义记忆检索的 embedding 客户端：同样是可选的，没配 OPENAI_API_KEY 时 make_embedder()
+# 返回 None，记忆的"相关度"评分自动退化成旧版的"认不认人"，不影响服务启动（见 llm/embeddings.py）。
+_embedder = make_embedder()
+app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories", guard_model=_guard_model, embedder=_embedder)
 
 
 @app.get("/health")
@@ -40,6 +44,20 @@ async def memories(npc_id: str) -> list[dict]:
 async def stats() -> dict:
     """决策统计：大模型调用次数、失败次数、规则决策次数。用于观察成本。"""
     return {**app.state.agent.stats, "breaker": app.state.agent.breaker.state}
+
+
+def _companion_status(npc_id: str) -> dict:
+    """伙伴状态：跟没跟着、手上拿没拿着东西、任务是什么——这些只存在于服务端内存里的
+    "物理事实"，网页版小demo靠这个接口把它们显示出来，不用靠解析台词文本去猜。"""
+    agent = app.state.agent
+    task = agent.tasks.get(npc_id)
+    return {
+        "npc_id": npc_id,
+        "pos": list(agent.positions.get(npc_id, (0.0, 0.0))),
+        "following": npc_id in agent.following,
+        "holding": agent.holding.get(npc_id),
+        "task": {"item": task.item, "destination": task.destination} if task else None,
+    }
 
 
 @app.websocket("/ws")
@@ -70,7 +88,17 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 continue
 
             if msg.type == "hello":
-                await send(Envelope(type="welcome", payload={"server": "townmind", "version": "0.3.0", "locations": world.locations_payload()}))
+                await send(
+                    Envelope(
+                        type="welcome",
+                        payload={
+                            "server": "townmind",
+                            "version": "0.3.0",
+                            "locations": world.locations_payload(),
+                            "items": world.items_payload(),
+                        },
+                    )
+                )
             elif msg.type == "position":
                 # 轻量的位置更新：不触发决策，也没有回复
                 app.state.agent.update_position(msg.npc_id or "unknown", msg.payload.get("pos"))
@@ -81,6 +109,8 @@ async def ws_endpoint(ws: WebSocket) -> None:
                 task = asyncio.create_task(handle_observation(msg))
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
+            elif msg.type == "status_query":
+                await send(Envelope(type="status", npc_id=msg.npc_id, payload=_companion_status(msg.npc_id or "unknown")))
             else:
                 await send(Envelope(type="error", payload={"detail": f"unexpected type {msg.type}"}))
     except WebSocketDisconnect:
