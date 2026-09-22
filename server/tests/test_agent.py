@@ -1,7 +1,7 @@
 import asyncio
 
 from townmind import world
-from townmind.agent import Agent, Task
+from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_SAID, Agent, Task
 from townmind.llm.base import ToolCall
 
 
@@ -807,3 +807,103 @@ def test_no_embedder_configured_never_calls_anything_and_behaves_like_before():
     a.hear_player("你好", [1.0, 0.0])
     decide(a, "alice", {"pos": [0.0, 0.0]})
     assert all(m.embedding is None for m in a._mem("alice").memories)
+
+
+# ---------- 动态重要度打分：斯坦福论文里另一个技术点，让大模型自己给记忆打分 ----------
+def test_dynamic_importance_uses_llm_scores_instead_of_fixed_constants():
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "要不要来块面包？"}),  # 主决策
+            ToolCall("rate_importance", {"scores": [3, 10]}),  # 给这一轮新增的两条记忆打分
+        ]
+    )
+    a = Agent(llm, dynamic_importance=True)
+    a._mem("alice").met.add("player")  # 避免"第一次见到玩家"额外多一条记忆，保持刚好两条待打分
+    a.hear_player("你好呀", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    scores = sorted(m.importance for m in a._mem("alice").memories)
+    assert scores == [3, 10]  # 不是写死的 IMPORTANCE_HEARD=6 / IMPORTANCE_SAID=4
+
+
+def test_dynamic_importance_falls_back_to_fixed_constants_when_count_mismatches():
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "要不要来块面包？"}),
+            ToolCall("rate_importance", {"scores": [3]}),  # 只打了一个分，跟两条记忆对不上
+        ]
+    )
+    a = Agent(llm, dynamic_importance=True)
+    a._mem("alice").met.add("player")
+    a.hear_player("你好呀", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    scores = sorted(m.importance for m in a._mem("alice").memories)
+    assert scores == sorted([IMPORTANCE_HEARD, IMPORTANCE_SAID])  # 退回写死的常量
+
+
+def test_dynamic_importance_off_by_default_costs_no_extra_llm_call():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm)  # dynamic_importance 默认 False
+    a.hear_player("你好", [1.0, 0.0])
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert r["name"] == "say"
+    assert llm.calls == []  # 只消耗了一次主决策调用，没有多打一次分
+
+
+# ---------- 反思：累计重要度过阈值就回顾一下、提炼出更高层的认识 ----------
+def test_reflection_triggers_when_threshold_crossed_and_stores_insight():
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "你好呀"}),
+            ToolCall("reflect", {"insights": ["玩家好像经常来找我聊天"]}),
+        ]
+    )
+    a = Agent(llm, use_reflection=True)
+    a._mem("alice").importance_since_reflection = 200.0  # 提前攒够阈值
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    texts = [m.text for m in a._mem("alice").memories]
+    assert "你反思后意识到：玩家好像经常来找我聊天" in texts
+    assert a.stats["reflections"] == 1
+    assert a._mem("alice").importance_since_reflection < 50.0  # 已经清零，只剩反思这条自己的重要度
+
+
+def test_reflection_not_triggered_below_threshold():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm, use_reflection=True)  # 全新的 store，累计重要度还远没到阈值
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert llm.calls == []  # 没有多消耗一次 reflect 调用
+    assert a.stats.get("reflections", 0) == 0
+
+
+def test_reflection_off_by_default_even_if_threshold_crossed():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm)  # use_reflection 默认 False
+    a._mem("alice").importance_since_reflection = 200.0
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert llm.calls == []
+    assert a.stats.get("reflections", 0) == 0
+
+
+def test_reflection_failure_resets_counter_without_crashing_decide():
+    class Boom:
+        async def choose_tool(self, system, user, tools):
+            if tools[0]["name"] == "reflect":
+                raise RuntimeError("down")
+            return ToolCall("say", {"text": "你好呀"})
+
+    a = Agent(Boom(), use_reflection=True)
+    a._mem("alice").importance_since_reflection = 200.0
+    a.hear_player("你好", [1.0, 0.0])
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert r["name"] == "say"  # 主决策没受影响
+    assert a._mem("alice").importance_since_reflection < 200.0  # 清零了，不会每轮都重新触发失败的反思
+    assert a.stats["reflections"] == 0  # 没有真的生成反思记忆
+
+
+def test_reflection_skipped_when_no_llm_configured():
+    a = Agent(None, use_reflection=True)
+    a._mem("alice").importance_since_reflection = 200.0
+    decide(a, "alice", {"pos": [0.0, 0.0]})  # 走的是纯规则兜底，压根没有 LLM 可用
+    assert a.stats.get("reflections", 0) == 0

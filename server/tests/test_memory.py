@@ -129,3 +129,52 @@ def test_load_old_file_without_embedding_field_defaults_to_none(tmp_path):
     )
     loaded = MemoryStore.load(path)
     assert loaded.memories[0].embedding is None
+
+
+# ---------- 反思：累计重要度过了阈值就该回顾一下、提炼出更高层的认识（同样出自那篇论文） ----------
+def test_importance_accumulates_and_crosses_reflection_threshold():
+    s = MemoryStore()
+    assert not s.should_reflect()
+    for _ in range(15):
+        s.add("琐事", 10, NOW)  # 15 * 10 = 150，正好到阈值
+    assert s.should_reflect()
+
+
+def test_mark_reflected_resets_the_counter():
+    s = MemoryStore()
+    for _ in range(20):
+        s.add("琐事", 10, NOW)
+    assert s.should_reflect()
+    s.mark_reflected()
+    assert not s.should_reflect()
+    assert s.importance_since_reflection == 0.0
+
+
+def test_custom_threshold_overrides_default():
+    s = MemoryStore()
+    s.add("小事", 5, NOW)
+    assert not s.should_reflect(threshold=10.0)
+    assert s.should_reflect(threshold=5.0)
+
+
+def test_save_and_load_roundtrip_preserves_reflection_counter(tmp_path):
+    s = MemoryStore()
+    s.add("琐事", 7, NOW)
+    path = tmp_path / "with_counter.json"
+    s.save(path)
+    loaded = MemoryStore.load(path)
+    assert loaded.importance_since_reflection == 7.0
+
+
+def test_load_old_file_without_reflection_field_defaults_to_zero(tmp_path):
+    """兼容加反思之前存的记忆文件：没有这个字段，读出来该是 0，不该报错、也不该凭空触发反思。"""
+    import json
+
+    path = tmp_path / "old_format.json"
+    path.write_text(
+        json.dumps({"met": [], "memories": [{"text": "老格式", "time": NOW, "importance": 9, "people": []}]}),
+        encoding="utf-8",
+    )
+    loaded = MemoryStore.load(path)
+    assert loaded.importance_since_reflection == 0.0
+    assert not loaded.should_reflect()

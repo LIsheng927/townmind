@@ -26,7 +26,16 @@ _guard_model = GuardModel() if os.getenv(ENV_ENABLE) else None
 # 语义记忆检索的 embedding 客户端：同样是可选的，没配 OPENAI_API_KEY 时 make_embedder()
 # 返回 None，记忆的"相关度"评分自动退化成旧版的"认不认人"，不影响服务启动（见 llm/embeddings.py）。
 _embedder = make_embedder()
-app.state.agent = Agent(_llm, memory_dir=DATA_DIR / "memories", guard_model=_guard_model, embedder=_embedder)
+# 动态重要度打分、反思：都会多花一次 LLM 调用，默认关，设了对应环境变量才打开
+# （见 agent.py 里 _rate_importance/_maybe_reflect 的说明）。
+app.state.agent = Agent(
+    _llm,
+    memory_dir=DATA_DIR / "memories",
+    guard_model=_guard_model,
+    embedder=_embedder,
+    dynamic_importance=bool(os.getenv("TOWNMIND_DYNAMIC_IMPORTANCE")),
+    use_reflection=bool(os.getenv("TOWNMIND_USE_REFLECTION")),
+)
 
 
 @app.get("/health")

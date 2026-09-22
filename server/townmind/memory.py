@@ -23,6 +23,9 @@ log = logging.getLogger("townmind.memory")
 RECENCY_HALF_LIFE = 120.0  # 秒。演示用的时间尺度；真实游戏里应换成游戏内时间
 DEFAULT_CAPACITY = 200
 DEFAULT_TOP_K = 5
+# 反思（同样出自 Stanford 那篇论文）：累计重要度一旦过了这个数，就该停下来回顾一遍最近的事、
+# 提炼出更高层次的认识了——数值跟论文里"重要度分数之和越过阈值"的量级保持一致。
+REFLECTION_THRESHOLD = 150.0
 
 
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -60,16 +63,25 @@ class MemoryStore:
         self.half_life = half_life
         self.memories: list[Memory] = []
         self.met: set[str] = set()  # 已经见过的人，用来判断"第一次见到"
+        self.importance_since_reflection: float = 0.0  # 上次反思以来，新记忆的重要度累计到了多少
 
     # ---- 存 ----
     def add(self, text: str, importance: int, now: float, people=(), embedding=None) -> None:
         importance = max(1, min(10, int(importance)))
         emb = tuple(embedding) if embedding is not None else None
         self.memories.append(Memory(text, now, importance, frozenset(people), emb))
+        self.importance_since_reflection += importance
         if len(self.memories) > self.capacity:
             # 容量满了：淘汰"又旧又不重要"的那条（不看相关度，因为它此刻与谁有关/跟什么话题有关不重要）
             worst = min(range(len(self.memories)), key=lambda i: self.score(self.memories[i], frozenset(), now))
             self.memories.pop(worst)
+
+    # ---- 反思 ----
+    def should_reflect(self, threshold: float = REFLECTION_THRESHOLD) -> bool:
+        return self.importance_since_reflection >= threshold
+
+    def mark_reflected(self) -> None:
+        self.importance_since_reflection = 0.0
 
     # ---- 取 ----
     def score(self, m: Memory, involved, now: float, query_embedding=None) -> float:
@@ -104,6 +116,7 @@ class MemoryStore:
     def save(self, path: Path) -> None:
         data = {
             "met": sorted(self.met),
+            "importance_since_reflection": self.importance_since_reflection,
             "memories": [
                 {
                     "text": m.text,
@@ -141,6 +154,9 @@ class MemoryStore:
             ]
             store.memories = memories
             store.met = set(data["met"])
+            # 老的记忆文件（加反思之前存的）没有这个字段，兜底成 0——大不了这个 NPC
+            # 重新攒一轮重要度才触发下一次反思，不会因为读老文件而崩溃
+            store.importance_since_reflection = float(data.get("importance_since_reflection", 0.0))
         except (OSError, ValueError, KeyError, TypeError) as e:
             log.warning("memory file %s is unreadable (%s); starting empty", path, e)
         return store

@@ -11,9 +11,13 @@ Claude，只要另外配了 OPENAI_API_KEY，语义检索照样能用。
 """
 import logging
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 log = logging.getLogger("townmind.embeddings")
 
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"  # server/.env，跟 llm/factory.py 是同一个文件
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 
 
@@ -35,7 +39,13 @@ class OpenAIEmbedder:
 
 
 def make_embedder() -> "OpenAIEmbedder | None":
-    """按环境变量创建 embedding 客户端；没配 key 时返回 None（记忆退化成不带语义相关度的旧公式）。"""
+    """按环境变量创建 embedding 客户端；没配 key 时返回 None（记忆退化成不带语义相关度的旧公式）。
+
+    自己读一遍 .env（不依赖调用方是不是先调用过 make_client()）——之前这里漏了这一步，
+    main.py 里能用纯粹是因为 make_client() 先跑了一遍、顺带把 .env 读进了进程环境变量；
+    单独只用 embedder 的脚本（比如 evals/memory_recall.py）跳过 make_client() 时就会读不到 key。
+    """
+    load_dotenv(ENV_PATH)
     if not os.getenv("OPENAI_API_KEY"):
         log.warning("no OPENAI_API_KEY; memory recall falls back to the non-semantic relevance term")
         return None

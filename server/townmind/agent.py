@@ -13,7 +13,7 @@ import time
 from collections import UserDict, defaultdict, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -154,6 +154,38 @@ def _tool_schemas(names: tuple[str, ...]) -> list[dict]:
 TOOLS = _tool_schemas(tuple(ARG_MODELS))  # 保留：给不区分场景、老的调用方式用（比如部分测试）
 
 
+# ---------- 记忆的两个"斯坦福 Generative Agents"技术点：动态重要度打分 + 反思 ----------
+# 这两个不是 NPC 的"动作"，不出现在 _tools_for() 给大模型的选项里，也不放进 ARG_MODELS——
+# 那个字典是给"这次要做什么"用的；这里是另外两次独立的、内部用的 LLM 调用，各自强制
+# 只能选一个工具，复用同一个 self.llm 客户端和 choose_tool 接口，但语义完全不同。
+class RateImportance(BaseModel):
+    """给这一轮新增的记忆逐条打重要度分（1-10），按输入顺序一一对应。"""
+
+    scores: list[int] = Field(description="每条记忆的重要度，1-10，按输入顺序一一对应")
+
+
+class Reflect(BaseModel):
+    """从最近的记忆里提炼出一两条更高层次的感想或规律，不是逐条复述发生了什么。"""
+
+    insights: list[Annotated[str, Field(min_length=1, max_length=60)]] = Field(
+        min_length=1, max_length=3, description="1 到 3 条更高层次的感想，每条不超过 30 个字"
+    )
+
+
+RATE_IMPORTANCE_TOOL = {
+    "name": "rate_importance",
+    "description": "给每条记忆打 1-10 的重要度分，按输入顺序一一对应",
+    "parameters": RateImportance.model_json_schema(),
+}
+REFLECT_TOOL = {
+    "name": "reflect",
+    "description": "从最近的记忆里提炼出一两条更高层次的感想或规律",
+    "parameters": Reflect.model_json_schema(),
+}
+IMPORTANCE_REFLECTION = 9  # 反思本身是提炼出来的高层认识，比一般琐事更值得记住
+REFLECTION_RECENT_K = 20  # 反思时回顾最近这么多条记忆
+
+
 @dataclass
 class SpeechEvent:
     id: int
@@ -195,6 +227,8 @@ class Agent:
         safety_layers: frozenset[str] = frozenset({"input", "prompt", "output", "memory"}),  # 评测时可逐层关闭
         guard_model: Any | None = None,  # 可选：guard/ 训练出来的 LoRA 分类器（townmind.guard_model.GuardModel）
         embedder: Any | None = None,  # 可选：语义检索用的 embedding 客户端（townmind.llm.embeddings.OpenAIEmbedder）
+        dynamic_importance: bool = False,  # 让大模型给每条新记忆打重要度分，换掉写死的常量；多一次 LLM 调用，默认关
+        use_reflection: bool = False,  # 累计重要度到一定量就反思一次、提炼出更高层的记忆；多一次 LLM 调用，默认关
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -210,6 +244,8 @@ class Agent:
         # 没传（比如没配 OPENAI_API_KEY）时为 None，_remember/recall 里据此优雅退化，
         # 记忆的"相关度"这一项从语义相似度变回"认不认人"，不影响别的功能。
         self.embedder = embedder
+        self.dynamic_importance = dynamic_importance
+        self.use_reflection = use_reflection
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -384,6 +420,8 @@ class Agent:
 
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
+            if self.use_reflection and self.llm is not None:
+                await self._maybe_reflect(npc_id, now)
         if self.trace is not None:
             self.trace.append(
                 {"t": now, "npc": npc_id, "source": source, "action": dict(action), "nearby": [o for o, _ in nearby]}
@@ -552,9 +590,17 @@ class Agent:
                 to_add.append((f"你{to}道别：「{action['text']}」", IMPORTANCE_FAREWELL, near_ids))
             else:
                 to_add.append((f"你{to}说了「{action['text']}」", IMPORTANCE_SAID, near_ids))
+        # 重要度：默认用上面写死的常量；开了 dynamic_importance 时改成让大模型自己打分
+        # （斯坦福 Generative Agents 论文里的做法），失败/关掉时用回常量，不会因为这一步
+        # 出问题就丢了这批记忆
+        scores = None
+        if self.dynamic_importance and self.llm is not None and to_add:
+            scores = await self._rate_importance(npc_id, [text for text, _, _ in to_add])
         embeddings = await self._embed_texts([text for text, _, _ in to_add])
-        for (text, importance, people), emb in zip(to_add, embeddings):
-            store.add(text, importance, now, people, embedding=emb)
+        for (text, fixed_importance, people), emb, score in zip(
+            to_add, embeddings, scores or [None] * len(to_add)
+        ):
+            store.add(text, score if score is not None else fixed_importance, now, people, embedding=emb)
         path = self._memory_path(npc_id)
         if path is not None:
             try:
@@ -586,6 +632,81 @@ class Agent:
             return None
         vectors = await self._embed_texts([text])
         return vectors[0]
+
+    async def _call_llm_tool(self, npc_id: str, system: str, user: str, tool: dict, stat_key: str) -> ToolCall | None:
+        """给"打重要度分""反思"这类可选的辅助 LLM 调用复用：走跟主决策一样的并发限流
+        （self._llm_slots），记账进同一套 token 统计（真金白银花出去的成本，不能漏记），
+        但不经过熔断器——熔断器只盯主决策这条链路的可用性，这些辅助调用偶尔失败只是
+        这次没打成分/没反思成，不该连带把主决策的"电路"也跳闸。失败或超时都返回 None，
+        调用方各自决定怎么优雅退化（用回写死的常量、或者干脆跳过这次反思）。"""
+        self.stats[stat_key] += 1
+        try:
+            async with self._llm_slots:
+                call = await asyncio.wait_for(self.llm.choose_tool(system, user, [tool]), self.timeout)
+        except Exception as e:
+            log.warning("[%s] %s 调用异常（%s: %s）", npc_id, stat_key, type(e).__name__, e)
+            return None
+        self.stats["tokens_in"] += call.input_tokens
+        self.stats["tokens_out"] += call.output_tokens
+        return call
+
+    async def _rate_importance(self, npc_id: str, texts: list[str]) -> list[int] | None:
+        """让大模型给这一轮新记忆逐条打重要度分（斯坦福 Generative Agents 论文里的做法），
+        代替写死的常量。格式不对、数量对不上，都退回 None，调用方用回固定常量——
+        不管这一步顺不顺利，记忆总归要被写进去，只是重要度打得粗一点。"""
+        system = (
+            "你在给一个游戏 NPC 的记忆系统打分。给每条记忆打 1-10 的重要度："
+            "1 分是完全平淡的日常小事（走到某处、随口打个招呼），"
+            "10 分是极其重要、会被长期记住、明显会影响以后判断的事"
+            "（比如接受了委托、涉及身份或规则、强烈情绪、危险警告）。"
+        )
+        user = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(texts))
+        call = await self._call_llm_tool(npc_id, system, user, RATE_IMPORTANCE_TOOL, "importance_calls")
+        if call is None:
+            return None
+        try:
+            scores = RateImportance(**call.arguments).scores
+        except Exception as e:
+            log.warning("[%s] importance 打分格式不对（%s: %s），退回固定重要度常量", npc_id, type(e).__name__, e)
+            return None
+        if len(scores) != len(texts):
+            log.warning(
+                "[%s] importance 打分数量（%d）跟记忆数量（%d）对不上，退回固定常量", npc_id, len(scores), len(texts)
+            )
+            return None
+        return scores
+
+    async def _maybe_reflect(self, npc_id: str, now: float) -> None:
+        """累计重要度到了阈值，就回顾最近的记忆、提炼出一两条更高层次的感想
+        （同样是斯坦福那篇论文里的机制），存成新的、重要度更高的记忆——这样记忆库里
+        不只是"发生过什么"的流水账，也会沉淀出"我发现……"这种更抽象的认识，
+        以后回忆时也更容易被检索到（走的是跟普通记忆一样的语义 embedding）。"""
+        store = self._mem(npc_id)
+        if not store.should_reflect():
+            return
+        recent = sorted(store.memories, key=lambda m: m.time, reverse=True)[:REFLECTION_RECENT_K]
+        store.mark_reflected()  # 不管这次反思成不成功都先清零计数，失败了也不会每轮都重新触发
+        if not recent:
+            return
+        persona = PERSONAS.get(npc_id, DEFAULT_PERSONA)
+        system = (
+            f"你是游戏小镇里的 NPC「{persona['name']}」，正在回顾自己最近经历的这些事，"
+            "试着从中总结出一两条更高层次的感想或规律——不是逐条复述发生了什么，"
+            "而是提炼出的认识，每条不超过 30 个字。"
+        )
+        user = "\n".join(f"- {format_age(now - m.time)}：{m.text}" for m in recent)
+        call = await self._call_llm_tool(npc_id, system, user, REFLECT_TOOL, "reflection_calls")
+        if call is None:
+            return
+        try:
+            insights = Reflect(**call.arguments).insights
+        except Exception as e:
+            log.warning("[%s] 反思格式不对（%s: %s），跳过这次反思", npc_id, type(e).__name__, e)
+            return
+        embeddings = await self._embed_texts(insights)
+        for text, emb in zip(insights, embeddings):
+            store.add(f"你反思后意识到：{text}", IMPORTANCE_REFLECTION, now, embedding=emb)
+            self.stats["reflections"] += 1
 
     def memory_dump(self, npc_id: str) -> list[dict]:
         return self._mem(npc_id).dump(self.clock())
