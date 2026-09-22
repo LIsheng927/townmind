@@ -5,13 +5,15 @@
 from pathlib import Path
 
 from townmind import guard_model as gm
+from townmind import world
 
 
 def test_full_world_context_matches_world_data():
     ctx = gm._full_world_context()
-    assert "面包店" in ctx and "铁匠铺" in ctx and "广场" in ctx
+    for loc in world.LOCATIONS:  # 每个地点都要在里面，不是只有最早那三个
+        assert loc.name in ctx, loc.name
     assert "面粉涨价了" in ctx  # 地点自己的 facts 也要在里面，不能只拼地点描述
-    assert "小镇很小" in ctx  # TOWN_FACTS 也要在里面
+    assert world.TOWN_FACTS[0] in ctx  # TOWN_FACTS 也要在里面（从设定里取，改文案不用回来改测试）
 
 
 def test_persona_for_known_npc_matches_training_time_format():

@@ -310,7 +310,7 @@ def test_wander_goes_to_real_places_or_idles():
     import random
 
     a = Agent(None, rng=random.Random(42))
-    names = {"面包店", "铁匠铺", "广场"}
+    names = {loc.name for loc in world.LOCATIONS}  # 从世界设定里取，别写死——加地点时这里不该跟着改
     for _ in range(50):
         r = a._wander("alice")
         assert r["name"] == "idle" or (r["name"] == "move_to" and r["place"] in names)

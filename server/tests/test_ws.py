@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 
+from townmind import world
 from townmind.agent import Agent
 from townmind.main import app
 
@@ -16,7 +17,8 @@ def test_hello_welcome():
         ws.send_json({"type": "hello"})
         msg = ws.receive_json()
         assert msg["type"] == "welcome"
-        assert {l["name"] for l in msg["payload"]["locations"]} == {"面包店", "铁匠铺", "广场"}
+        # 下发的地点必须和服务端的世界设定完全一致——"小镇有哪些地点"只维护一份
+        assert {l["name"] for l in msg["payload"]["locations"]} == {loc.name for loc in world.LOCATIONS}
 
 
 def test_observation_returns_move_action():
