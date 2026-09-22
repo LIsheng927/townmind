@@ -802,14 +802,18 @@ class Agent:
         return scores
 
     async def _maybe_reflect(self, npc_id: str, now: float) -> None:
-        """累计重要度到了阈值，就回顾最近的记忆、提炼出一两条更高层次的感想
-        （同样是斯坦福那篇论文里的机制），存成新的、重要度更高的记忆——这样记忆库里
-        不只是"发生过什么"的流水账，也会沉淀出"我发现……"这种更抽象的认识，
-        以后回忆时也更容易被检索到（走的是跟普通记忆一样的语义 embedding）。"""
+        """累计重要度到了阈值，就回顾最近发生的事里"最值得想起来"的那些、提炼出一两条
+        更高层次的感想（同样是斯坦福那篇论文里的机制），存成新的、重要度更高的记忆——
+        这样记忆库里不只是"发生过什么"的流水账，也会沉淀出"我发现……"这种更抽象的认识，
+        以后回忆时也更容易被检索到（走的是跟普通记忆一样的语义 embedding）。
+        选材现在跟 recall() 走同一套新近度+重要度打分（这里没有具体"正在聊什么"，相关度
+        这一项恒为 0），而不是单纯按时间倒序——该反思的是"最近且重要"的事，不是随便什么
+        最近的事，跟检索用同一套算法逻辑也让这两处的设计更自洽。"""
         store = self._mem(npc_id)
         if not store.should_reflect():
             return
-        recent = sorted(store.memories, key=lambda m: m.time, reverse=True)[:REFLECTION_RECENT_K]
+        recent = store.recall(frozenset(), now, k=REFLECTION_RECENT_K)
+        recent.sort(key=lambda m: m.time, reverse=True)  # 挑完之后按时间顺序读给大模型，叙事更自然
         store.mark_reflected()  # 不管这次反思成不成功都先清零计数，失败了也不会每轮都重新触发
         if not recent:
             return
