@@ -35,6 +35,9 @@ META_REFLECTION_THRESHOLD = 300.0
 # 而一起挤进来、占掉本该属于"另一件事"的名额。lambda 越接近 1，越只看分数本身（退化成
 # 纯 top-k）；越接近 0，越优先追求多样性。0.7 是个"以相关性为主、但不完全无视重复"的取值。
 MMR_LAMBDA = 0.7
+# 主动分享：重要度到了这个数的记忆才值得主动跟人提起。定在 6 是因为一般的寒暄、
+# "你第一次见到某人"这类日常记录都在这之下，不会让 NPC 见谁都絮叨鸡毛蒜皮的事。
+SHARE_MIN_IMPORTANCE = 6
 
 
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -58,6 +61,10 @@ class Memory:
     # 只用来决定"这条记忆该不该被算进分层反思的选材/计数里"，不影响 recall() 的排序——三种
     # kind 在检索时一视同仁，都是靠新近度+重要度+相关度三项打分。
     kind: str = "event"
+    # 这件事我已经跟谁讲过了。NPC 主动跟人搭话、分享自己知道的事时用它去重——
+    # 没有这个标记的话，同一件事会被翻来覆去讲给同一个人听，这是"会主动说话的 NPC"
+    # 最容易露馅的地方。只记"讲给谁"，不记"讲过几次"：一次就够了。
+    told_to: frozenset[str] = frozenset()
 
 
 def format_age(seconds: float) -> str:
@@ -227,6 +234,31 @@ class MemoryStore:
             selected.append(pool.pop(best_idx)[0])
         return selected
 
+    # ---- 主动分享 ----
+    def mark_told(self, m: Memory, who: str) -> None:
+        """记下"这件事我跟 who 讲过了"，下次就不会再挑中它去跟同一个人讲。"""
+        m.told_to = m.told_to | {who}
+
+    def shareable(self, other: str, now: float, min_importance: int = SHARE_MIN_IMPORTANCE, k: int = 1) -> list[Memory]:
+        """挑出"值得主动跟 other 说、而且还没跟ta说过"的记忆，按打分从高到低给前 k 条。
+
+        三层筛选，每一层都是为了让主动搭话显得自然而不是机械：
+          1. 重要度够高——鸡毛蒜皮的事不值得特意提起；
+          2. 还没跟这个人讲过（told_to）——不然同一件事会翻来覆去讲给同一个人听；
+          3. 这个人自己不在这条记忆里（other not in people）——不要把对方刚说过的话
+             当成新鲜事讲回给ta听，这是最容易让人出戏的一种。
+
+        排序复用 score()（新近度+重要度），不带 query_embedding：这里问的是"我手上有什么
+        值得说的事"，不是"跟此刻的话题有多相关"——相关性该由大模型看着当下的对话自己判断，
+        检索这一层只负责把够分量的候选捞出来。"""
+        pool = [
+            m
+            for m in self.memories
+            if m.importance >= min_importance and other not in m.told_to and other not in m.people
+        ]
+        pool.sort(key=lambda m: self.score(m, frozenset(), now), reverse=True)
+        return pool[: max(0, k)]
+
     # ---- 调试 ----
     def dump(self, now: float, limit: int = 50) -> list[dict]:
         newest = sorted(self.memories, key=lambda m: m.time, reverse=True)[:limit]
@@ -254,6 +286,7 @@ class MemoryStore:
                     "people": sorted(m.people),
                     "embedding": list(m.embedding) if m.embedding is not None else None,
                     "kind": m.kind,
+                    "told_to": sorted(m.told_to),
                 }
                 for m in self.memories
             ],
@@ -282,6 +315,9 @@ class MemoryStore:
                     # 老的记忆文件（加分层反思之前存的）没有这个字段，兜底成 "event"——
                     # 不会把老记忆错当成一级反思，二级反思的计数也不会被老数据污染
                     d.get("kind", "event"),
+                    # 老的记忆文件（加主动分享之前存的）没有这个字段，兜底成空集合——
+                    # 最坏的结果只是这些老记忆有可能被再讲一遍，不会崩
+                    frozenset(d.get("told_to", ())),
                 )
                 for d in data["memories"]
             ]

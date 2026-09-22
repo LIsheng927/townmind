@@ -219,6 +219,10 @@ IMPORTANCE_META_REFLECTION = 10  # 二级反思是"感想的感想"，是整个�
 META_REFLECTION_RECENT_K = 8  # 二级反思时回顾最近这么多条一级反思
 LORE_TOP_K = 3  # "镇上的事"语义检索之后，最多留几条塞进提示词
 RELATIONSHIP_RECENT_K = 6  # 判断关系变化时，回顾跟这个人有关的最近几条记忆
+# 主动分享的信任门槛：低于这个值就不跟对方说自己知道的事。取 -1.5 是 social._level 里
+# "不太信得过"那一档的分界——也就是说，只有真的信不过的人才会被闭嘴，泛泛之交照说不误
+# （现实里也是这样：不熟不代表不聊天，只有心里有疙瘩才会留一手）。
+SHARE_TRUST_FLOOR = -1.5
 
 
 @dataclass
@@ -271,6 +275,9 @@ class Agent:
         # "教训"记忆，让这次纠正靠语义检索在未来别的话题里也可能被想起，不只在当轮起效；默认关，等真实数据验证效果
         use_relationships: bool = False,  # 给每个人单独记一份好感/信任，影响语气和愿不愿意把事告诉他；
         # 每场对话结束后多一次 LLM 调用（跟反思、动态重要度一样是可选的增强），默认关，方便做消融对比
+        use_gossip: bool = False,  # 主动把自己知道的事讲给别人听（八卦）。不额外花 LLM 调用，
+        # 只是在提示词里多给一条候选；跟 use_relationships 分开是为了能单独做消融——
+        # 两个都开时，信不过的人不会听到你知道的事
     ) -> None:
         self.llm = llm
         self.rng = rng or random.Random()
@@ -293,6 +300,7 @@ class Agent:
         self.verify_and_revise = verify_and_revise
         self.reflexion_lessons = reflexion_lessons
         self.use_relationships = use_relationships
+        self.use_gossip = use_gossip
         # 关系册：每个 NPC 一本，记"我对谁是什么印象"。跟记忆一样按 npc_id 分开、懒加载，
         # 落盘也跟记忆走同一个目录（见 _relation_path）
         self._relations: dict[str, RelationshipBook] = {}
@@ -348,7 +356,7 @@ class Agent:
 
     async def _guard_output(
         self, npc_id, action, heard, nearby, status, recalled=(), now=0.0, relevant_town_facts=None,
-        suspect_said=(), retry=True,
+        suspect_said=(), retry=True, share_hint=None,
     ):
         """大模型的答案发出去之前，再过一遍质检员。不通过时，默认直接换成行为树的台词；
         开了 verify_and_revise 时，先给大模型一次"带着被拦下的具体内容重说一次"的机会
@@ -380,13 +388,14 @@ class Agent:
             self.stats["guard_revise_attempts"] += 1
             revised, revised_source = await self._ask_llm(
                 npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said, revise_hint=text,
+                share_hint=share_hint,
             )
             if revised_source == "llm":
                 # retry=False 往下传：避免重试的这次又被拦下时再递归重试，最多比平时多一次
                 # LLM 调用，不会没完没了
                 return await self._guard_output(
                     npc_id, revised, heard, nearby, status, recalled, now, relevant_town_facts, suspect_said,
-                    retry=False,
+                    retry=False, share_hint=share_hint,
                 )
         return self._fallback(npc_id, heard, nearby, status), "fallback"
 
@@ -432,17 +441,20 @@ class Agent:
         action, source = None, "fallback"
         suspect_said: list[tuple[Memory, str]] = []  # decide() 末尾学教训那一步要用到；不是每条分支
         # 都会真的问大模型、真的查出可疑记忆，先给个默认值
+        share_hint: tuple[str, Memory] | None = None  # 同理：只有真要问大模型那一轮才挑
         if self.llm is not None:
             if interesting and status == "ok":
                 # 只有这一种情况才花钱问大模型；suspect_said 同理，只在真要问大模型这一轮才查，
                 # 不在纯规则决策的那几种情况上白跑一次 guard_model 推理
                 suspect_said = await self._flag_suspect_said_memories(npc_id, recalled)
+                share_hint = self._pick_share_hint(npc_id, nearby, now)
                 action, source = await self._ask_llm(
-                    npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said
+                    npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said, share_hint=share_hint
                 )
                 if source == "llm" and "output" in self.safety_layers:
                     action, source = await self._guard_output(
-                        npc_id, action, heard, nearby, status, recalled, now, relevant_town_facts, suspect_said
+                        npc_id, action, heard, nearby, status, recalled, now, relevant_town_facts, suspect_said,
+                        share_hint=share_hint,
                     )
             elif interesting and status == "cooldown":
                 # 刚说过话，还不能再说：原地等对方回应，而不是走开
@@ -495,6 +507,15 @@ class Agent:
         self.stats[source] += 1
         if action["name"] == "say":
             self._record_speech(npc_id, action["text"], now)
+            if share_hint is not None:
+                # 提示词里给过这条候选、而且这一轮确实说话了，就记成"跟ta讲过了"。
+                # 严格说我们并不知道大模型到底有没有真的把这件事说出口（生成的是自由文本，
+                # 逐字去比对既脆弱又不准）；但这个标记要解决的问题是"同一件事别翻来覆去跟
+                # 同一个人讲"，按"给过机会就算讲过"来记，正好达到这个目的，代价只是偶尔
+                # 有一件事没被说出口就不再提了——比起车轱辘话，这个代价更划算。
+                other, mem = share_hint
+                self._mem(npc_id).mark_told(mem, other)
+                self.stats["shares_told"] += 1
 
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
@@ -564,6 +585,7 @@ class Agent:
 
     async def _ask_llm(
         self, npc_id, heard, nearby, recalled, now, relevant_town_facts=None, suspect_said=(), revise_hint=None,
+        share_hint=None,
     ):
         if not self.breaker.allow():
             # 熔断中：大模型服务最近连续出问题，直接走兜底，不发请求
@@ -571,6 +593,7 @@ class Agent:
             return None, "fallback"
         system, user = self._build_prompt(
             npc_id, heard, nearby, recalled, now, relevant_town_facts, suspect_said, revise_hint,
+            share_hint=share_hint,
         )
         tools = self._tools_for(npc_id)
         self.stats["llm_calls"] += 1
@@ -701,6 +724,28 @@ class Agent:
             store = MemoryStore.load(path) if path else MemoryStore()
             self._memories[npc_id] = store
         return store
+
+    def _pick_share_hint(self, npc_id: str, nearby, now: float) -> tuple[str, Memory] | None:
+        """挑一件"值得主动跟眼前这个人提一句"的事；挑不出来就返回 None，提示词里什么都不加。
+
+        只挑一条、只挑一个人（离得最近的那个）：一次搭话本来就只该提一件事，塞三件进去
+        会让 NPC 像复读机一样把知道的都倒出来，反而不像人。
+
+        这里是"关系"这一层真正改变行为的地方，而不只是在提示词里多一句形容词：
+        信不过的人（trust < SHARE_TRUST_FLOOR）会被直接跳过，知道的事宁可不说。"""
+        if not (self.use_gossip and self.use_memory):
+            return None
+        store = self._mem(npc_id)
+        book = self._rel(npc_id) if self.use_relationships else None
+        for other, _ in sorted(nearby, key=lambda pair: pair[1]):
+            if book is not None and book.trust_of(other, now) < SHARE_TRUST_FLOOR:
+                self.stats["share_blocked_by_distrust"] += 1
+                continue
+            picked = store.shareable(other, now, k=1)
+            if picked:
+                self.stats["share_hints"] += 1
+                return other, picked[0]
+        return None
 
     def _relation_path(self, npc_id: str) -> Path | None:
         if self.memory_dir is None:
@@ -1057,6 +1102,7 @@ class Agent:
     def _build_prompt(
         self, npc_id, heard, nearby, recalled: list[Memory], now: float,
         relevant_town_facts=None, suspect_said: list[tuple[Memory, str]] = (), revise_hint: str | None = None,
+        share_hint: tuple[str, Memory] | None = None,
     ) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         task = self.tasks.get(npc_id)
@@ -1163,6 +1209,15 @@ class Agent:
         if recalled:
             lines.append("你想起了：")
             lines += [f"- {format_age(now - m.time)}：{m.text}" for m in recalled]
+        if share_hint is not None:
+            # 给一条"可以主动提起的事"，但措辞上留足余地——硬性要求它每次都把这件事说出去，
+            # NPC 会变成见谁都推销同一条消息的复读机；给成"可以说也可以不说"，说不说由
+            # 大模型看着当下的话题自己定，才像真人闲聊时想起一件事顺口提一嘴
+            other, mem = share_hint
+            lines.append(
+                f"你还知道一件{_name(other)}多半还不知道的事：「{mem.text}」。"
+                "如果聊得下去，可以顺口提一句；话题对不上、或者不想说，也可以不说。"
+            )
         said = len(self.say_times[npc_id])
         if said:
             lines.append(f"你在最近 {CHAT_WINDOW:.0f} 秒内已经说了 {said} 句话（最多 {MAX_SAYS_PER_WINDOW} 句）。")
