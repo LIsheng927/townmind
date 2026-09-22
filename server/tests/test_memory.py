@@ -4,6 +4,7 @@ from townmind.memory import (
     HOP_IMPORTANCE_DECAY,
     SHARE_MIN_IMPORTANCE,
     MemoryStore,
+    conveys,
     format_age,
     retold_importance,
 )
@@ -466,3 +467,25 @@ def test_normalization_off_keeps_raw_cosine_and_importance_wins():
 def test_normalization_flag_is_a_constructor_argument_too():
     assert MemoryStore(normalize_relevance=False).normalize_relevance is False
     assert MemoryStore().normalize_relevance is True
+
+
+# ---------- conveys：这句话有没有真把那件事讲出去 ----------
+KEY = "医馆的 Dan 昨晚把库房钥匙弄丢了，今天到处在找"
+
+
+def test_conveys_accepts_a_faithful_and_a_hedged_retelling():
+    assert conveys(KEY, "听说 Dan 把库房钥匙弄丢了")
+    assert conveys(KEY, "我听 Alice 说医馆好像丢了钥匙")
+    assert conveys("集市的米价涨了三成", "听说米价涨了三成")
+
+
+def test_conveys_rejects_a_greeting_that_merely_shares_a_word():
+    # 实验台上真实发生过的那句：跟原话只共享"今天"两个字
+    assert not conveys(KEY, "早上好，Elsa、Iris、Finn！今天的面包又香又好吃呀！")
+    assert not conveys("集市的米价涨了三成", "一")
+
+
+def test_conveys_ignores_the_memory_wrapper_text():
+    # "对你说"这种包装不算内容，不能靠它制造重合
+    assert not conveys("Bob对你说：「集市的米价涨了三成」", "Carol对你说：「今天天气不错」")
+    assert conveys("Bob对你说：「集市的米价涨了三成」", "米价涨了三成，Bob 说的")

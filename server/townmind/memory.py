@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,6 +58,50 @@ SHARE_MIN_IMPORTANCE = 6
 # 传了，而且越是一开始就轰动的消息传得越远。这不是硬写的规则，是两个数凑在一起的结果，
 # 具体能传几手由 evals/gossip_propagation.py 实测，不在这里拍脑袋下结论。
 HOP_IMPORTANCE_DECAY = 0.8
+
+
+_QUOTED_RE = re.compile(r"「(.*)」")
+_CONTENT_RUN_RE = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+")
+CONVEY_MIN_SHARED = 3  # 共有的内容片段达到这个数就算"讲出去了"……
+CONVEY_MIN_RATIO = 0.3  # ……或者占原话内容片段的三成（短句子够不到 3 个时用这条）
+
+
+def _content_pieces(text: str) -> set[str]:
+    """把一句话拆成"内容片段"：汉字按相邻两字一组（bigram），名字/数字整个算一个。
+    记忆里"Bob对你说：「…」""你对Bob说了「…」"这种包装先剥掉，只看引号里的原话，
+    不然"对你说"这三个字会在任何两条对话记忆之间制造假重合。"""
+    m = _QUOTED_RE.search(text)
+    if m:
+        text = m.group(1)
+    pieces: set[str] = set()
+    for run in _CONTENT_RUN_RE.findall(text):
+        if run[0].isascii():
+            pieces.add(run.lower())
+        elif len(run) == 1:
+            pieces.add(run)
+        else:
+            pieces.update(run[i : i + 2] for i in range(len(run) - 1))
+    return pieces
+
+
+def conveys(source_text: str, utterance: str) -> bool:
+    """这句话有没有真的把那件事讲出去。
+
+    为什么需要这个：主动分享是"在提示词里给一条候选，说不说由大模型定"。之前的做法
+    是只要给过候选、这轮又说话了，就当讲过了——并且把这条消息的代数、topic 标签挂在
+    这次发言上。实验台第一次跑传话就把这个漏洞照了出来：悄悄告诉 Alice"钥匙丢了"，
+    她转头对 Finn 说的是「早上好，今天的面包又香又好吃呀」，Finn 记下的这句问候却
+    被打上了钥匙那条消息的 topic 和 hop=1；再传两轮，追踪面板显示"10 人知道、最远
+    3 手"，而实际上没有一个人听说过钥匙的事。传播链是真的，内容是假的。
+
+    判定用内容片段重合，不用语义向量：确定、零成本、能写单测；代价是转述得极简
+    （"Dan 在找东西"）可能判成没讲——那只会让这条消息晚一轮再被提起，不会让
+    一句问候冒充传闻。"""
+    src = _content_pieces(source_text)
+    if not src:
+        return False
+    shared = len(src & _content_pieces(utterance))
+    return shared >= CONVEY_MIN_SHARED or shared / len(src) >= CONVEY_MIN_RATIO
 
 
 def retold_importance(source_importance: int) -> int:

@@ -7,6 +7,7 @@ from townmind.agent import (
     IMPORTANCE_LESSON,
     IMPORTANCE_META_REFLECTION,
     IMPORTANCE_SAID,
+    SHARE_GIVE_UP_AFTER,
     Agent,
     Task,
     _self_said_text,
@@ -1429,7 +1430,7 @@ def test_gossip_does_not_tell_someone_their_own_news():
 
 def test_gossip_not_repeated_to_the_same_person():
     clock = FakeClock()
-    llm = ScriptedLLM([ToolCall("say", {"text": "一"}), ToolCall("say", {"text": "二"})])
+    llm = ScriptedLLM([ToolCall("say", {"text": "听说米价涨了三成"}), ToolCall("say", {"text": "二"})])
     a = Agent(llm, use_gossip=True, clock=clock)
     a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
     decide(a)
@@ -1442,7 +1443,7 @@ def test_gossip_not_repeated_to_the_same_person():
 
 def test_gossip_told_to_one_person_is_still_news_to_another():
     clock = FakeClock()
-    llm = ScriptedLLM([ToolCall("say", {"text": "一"}), ToolCall("say", {"text": "二"})])
+    llm = ScriptedLLM([ToolCall("say", {"text": "听说米价涨了三成"}), ToolCall("say", {"text": "二"})])
     a = Agent(llm, use_gossip=True, clock=clock)
     a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
     decide(a)  # 讲给 bob 听
@@ -1943,3 +1944,42 @@ def test_last_query_records_what_the_recall_was_about():
     a.positions["bob"] = (1.0, 0.0)
     asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
     assert a.last_query["alice"]["nearby"] == ["Bob"]
+
+
+# ---------- 只有真讲出去了才算传播 ----------
+def test_hint_ignored_by_the_model_is_not_counted_as_told():
+    """实验台照出来的漏洞：给了候选、模型却说了句问候，之前会被当成"讲过了"，
+    听的人还会顶着传闻的 topic/hop 记下这句问候。"""
+    clock = FakeClock()
+    a, llm = _rumor_agent(clock, ["早上好呀，今天天气真不错", "早"])
+    a._mem("alice").memories[0].topic = "rice"
+    decide(a, "alice")
+    decide(a, "bob")
+    assert a.stats.get("shares_told", 0) == 0 and a.stats["share_hints_ignored"] == 1
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text][0]
+    assert heard.hop == 0 and heard.topic == ""  # 一句问候不是传闻
+    assert a.rumor_trace("rice")["reach"] == 1  # 只有 alice 自己知道
+
+
+def test_ignored_hint_is_offered_again_then_given_up():
+    clock = FakeClock()
+    replies = ["早上好"] * SHARE_GIVE_UP_AFTER + ["今天天气不错"]
+    a, llm = _rumor_agent(clock, replies)
+    for _ in range(SHARE_GIVE_UP_AFTER):
+        decide(a, "alice")
+        clock.t += 15
+    assert all(HINT in u for u in llm.users), "没讲出口就该继续提示"
+    assert a.stats["shares_given_up"] == 1
+    decide(a, "alice")
+    assert HINT not in llm.users[-1], "提示够次数了就该放弃，别永远挂着"
+
+
+def test_hint_actually_spoken_is_counted_and_tagged():
+    clock = FakeClock()
+    a, _ = _rumor_agent(clock, ["我听说集市的米价涨了三成呢", "是吗"])
+    a._mem("alice").memories[0].topic = "rice"
+    decide(a, "alice")
+    decide(a, "bob")
+    assert a.stats["shares_told"] == 1
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text][0]
+    assert heard.hop == 1 and heard.topic == "rice"
