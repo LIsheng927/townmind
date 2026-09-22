@@ -29,6 +29,7 @@ namespace TownMind.World
             Spawn("alice", new Vector3(-3, 0.5f, 0), Color.red);
             Spawn("bob", new Vector3(0, 0.5f, 3), Color.blue);
             Spawn("carol", new Vector3(3, 0.5f, -2), Color.yellow);
+            SpawnPlayer(new Vector3(0, 0.5f, -5));
 
             var cam = Camera.main;
             if (cam != null)
@@ -50,6 +51,22 @@ namespace TownMind.World
             go.transform.position = pos;
             go.GetComponent<Renderer>().material.color = color;
             go.AddComponent<NpcController>().Init(id, _client);
+        }
+
+        /// <summary>玩家的身体：胶囊体 + 底部聊天输入框，都是代码搭的，不用在编辑器里手动拖场景。
+        /// 跟 NPC 共用同一个 TownClient 连接（同一条 WebSocket，服务端按 npc_id/position 区分谁是谁）。</summary>
+        private void SpawnPlayer(Vector3 pos)
+        {
+            var go = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+            go.name = "player";
+            go.transform.position = pos;
+            go.GetComponent<Renderer>().material.color = new Color(0.16f, 0.37f, 0.66f); // 蓝色，跟网页版 demo 里玩家的颜色一致
+            var label = TextLabel.Make(go.transform, "你", new Vector3(0, 1.3f, 0), 0.18f, Color.white);
+            if (Camera.main != null) label.transform.rotation = Camera.main.transform.rotation;
+
+            var input = PlayerHud.Create();
+            var controller = go.AddComponent<PlayerController>();
+            controller.Init(_client, input);
         }
 
         private void OnMessage(Envelope msg)
