@@ -26,8 +26,10 @@ _guard_model = GuardModel() if os.getenv(ENV_ENABLE) else None
 # 语义记忆检索的 embedding 客户端：同样是可选的，没配 OPENAI_API_KEY 时 make_embedder()
 # 返回 None，记忆的"相关度"评分自动退化成旧版的"认不认人"，不影响服务启动（见 llm/embeddings.py）。
 _embedder = make_embedder()
-# 动态重要度打分、反思：都会多花一次 LLM 调用，默认关，设了对应环境变量才打开
-# （见 agent.py 里 _rate_importance/_maybe_reflect 的说明）。
+# 几个可选增强，一律默认关、设了对应环境变量才打开：它们要么多花一次 LLM 调用，要么
+# 改变 NPC 的行为，关掉时服务的表现跟加这些功能之前完全一致，方便做消融对比。
+# 各自的说明见 agent.py 里对应的方法：_rate_importance / _maybe_reflect /
+# _maybe_update_relationship / _pick_share_hint / _maybe_compress_conversation。
 app.state.agent = Agent(
     _llm,
     memory_dir=DATA_DIR / "memories",
@@ -35,6 +37,14 @@ app.state.agent = Agent(
     embedder=_embedder,
     dynamic_importance=bool(os.getenv("TOWNMIND_DYNAMIC_IMPORTANCE")),
     use_reflection=bool(os.getenv("TOWNMIND_USE_REFLECTION")),
+    use_relationships=bool(os.getenv("TOWNMIND_USE_RELATIONSHIPS")),
+    use_gossip=bool(os.getenv("TOWNMIND_USE_GOSSIP")),
+    compress_conversations=bool(os.getenv("TOWNMIND_COMPRESS_CONVERSATIONS")),
+    # 这两个真实数据没测出正向收益（见 README"CoVe 式重试和 Reflexion 式教训记忆"
+    # 小节），保持默认关。这里照样接上环境变量，是为了想重新验证时不用改代码——
+    # 接上不等于打开，不填就是关的。
+    verify_and_revise=bool(os.getenv("TOWNMIND_VERIFY_AND_REVISE")),
+    reflexion_lessons=bool(os.getenv("TOWNMIND_REFLEXION_LESSONS")),
 )
 
 

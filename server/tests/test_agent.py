@@ -1799,3 +1799,48 @@ def test_summary_is_not_compressed_again_next_conversation():
     lines = a._conversation_lines("alice", clock(), {"bob"})
     assert all(m.kind == "event" for m in lines)
     assert summary_before == [m.text for m in a._mem("alice").memories if m.kind == "conversation"]
+
+
+# ---------- 可选开关必须真的能从服务里打开 ----------
+def test_every_optional_agent_flag_is_wired_into_the_service():
+    """Agent 上每个默认关闭的开关，都必须能通过环境变量在 main.py 里打开。
+
+    这条测试是踩坑之后补的：社交层（use_relationships）和八卦（use_gossip）代码写完、
+    单测也全过，但 main.py 忘了接——于是真实服务跑起来时这两个功能整个是关着的，
+    看日志还以为在工作（NPC 确实在互相传消息，但那是大模型自己复述听到的话，
+    不是 share_hint 机制）。这种漏接不会报错、不会有任何症状，只会让一整块功能
+    悄悄失效，所以值得用测试钉住。
+
+    判定标准：__init__ 里默认值正好是 False 的布尔参数，都算"可选增强开关"。
+    接上环境变量不等于打开——不填就是关的，只是保证想开的时候不用改代码。
+    """
+    import inspect
+    from pathlib import Path
+
+    from townmind import main as main_module
+
+    source = Path(main_module.__file__).read_text(encoding="utf-8")
+    flags = [
+        name
+        for name, p in inspect.signature(Agent.__init__).parameters.items()
+        if p.default is False
+    ]
+    assert flags, "一个可选开关都没找到，判定条件大概是写错了"
+    missing = [f for f in flags if f"{f}=" not in source]
+    assert not missing, f"这些开关没接进 main.py，服务里根本用不上：{missing}"
+
+
+def test_optional_flags_are_documented_in_env_example():
+    """接上了还得写进 .env.example，不然别人（包括三个月后的自己）根本不知道有这些开关。"""
+    import re
+    from pathlib import Path
+
+    from townmind import main as main_module
+
+    root = Path(main_module.__file__).resolve().parents[1]
+    example = (root / ".env.example").read_text(encoding="utf-8")
+    source = (root / "townmind" / "main.py").read_text(encoding="utf-8")
+    env_names = set(re.findall(r'os\.getenv\("(TOWNMIND_[A-Z_]+)"\)', source))
+    documented = set(re.findall(r"^(TOWNMIND_[A-Z_]+)=", example, re.M))
+    missing = sorted(env_names - documented - {"TOWNMIND_DATA_DIR"})  # 数据目录不是功能开关
+    assert not missing, f"这些环境变量没写进 .env.example：{missing}"
