@@ -1896,3 +1896,37 @@ def test_conversation_peers_accumulate_over_the_whole_conversation():
     a.positions["bob"] = (100.0, 100.0)  # bob 走了
     decide(a)
     assert a.conversation_peers["alice"] >= {"bob", "carol"}  # 两个都记着
+
+
+# ---------- 运行时开关 ----------
+def test_set_flags_reaches_loaded_and_future_stores():
+    """检索相关的两项要能一次改到所有 NPC：已经加载的当场改，还没加载的在加载时补上。"""
+    a = Agent(None)
+    a._mem("alice")  # 先加载一个
+    a.set_flags(normalize_relevance=False, mmr_lambda=1.0, use_gossip=True)
+    assert a.use_gossip is True
+    assert a._mem("alice").normalize_relevance is False and a._mem("alice").mmr_lambda == 1.0
+    assert a._mem("bob").normalize_relevance is False and a._mem("bob").mmr_lambda == 1.0
+    assert a.flags()["normalize_relevance"] is False and a.flags()["mmr_lambda"] == 1.0
+
+
+def test_set_flags_rejects_the_whole_batch_on_any_bad_key():
+    import pytest
+
+    a = Agent(None)
+    before = a.flags()
+    with pytest.raises(ValueError):
+        a.set_flags(use_gossip=True, no_such_flag=True)
+    with pytest.raises(ValueError):
+        a.set_flags(mmr_lambda=1.5)
+    with pytest.raises(ValueError):
+        a.set_flags(use_gossip="yes")
+    assert a.flags() == before, "一个键出错就该整批拒绝，不能改一半"
+
+
+def test_flags_lists_every_default_false_constructor_flag():
+    """构造函数里每个默认 False 的开关都要能在运行时切——加了新开关忘了登记，这里会挂。"""
+    import inspect
+
+    ctor_flags = {n for n, p in inspect.signature(Agent.__init__).parameters.items() if p.default is False}
+    assert ctor_flags <= set(Agent(None).flags()), ctor_flags - set(Agent(None).flags())

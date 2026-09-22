@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from . import fallback, policy, safety, world
 from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
-from .memory import Memory, MemoryStore, _cosine, format_age, retold_importance
+from .memory import MMR_LAMBDA, Memory, MemoryStore, _cosine, format_age, retold_importance
 from .personas import DEFAULT_PERSONA, PERSONAS
 from .social import RelationshipBook
 from .spatial import SpatialGrid
@@ -68,6 +68,24 @@ IMPORTANCE_FAREWELL = 5
 IMPORTANCE_SAID = 4  # 我自己说的话
 # 走路和休息不值得记：占位置、没信息量，所以不存
 MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
+
+# 运行时可以切的开关（见 flags / set_flags）。这份名单是 demo 的骨架：演示的不是 NPC 聊天，
+# 是"同一个小镇、同一个问题，把某项技术关掉会怎样"——所以每个开关都必须能在服务不重启的
+# 情况下当场切，切完立刻对所有 NPC 生效。不在名单里的构造参数（llm、embedder、时钟、
+# 安全层）是部署配置，不是实验变量，运行时不许动。
+RUNTIME_BOOL_FLAGS = (
+    "use_memory",
+    "normalize_relevance",
+    "dynamic_importance",
+    "use_reflection",
+    "use_relationships",
+    "use_gossip",
+    "compress_conversations",
+    "distrust_own_memory",
+    "expressive_dialogue",
+    "verify_and_revise",
+    "reflexion_lessons",
+)
 
 # "自己以前说过的话"这类记忆固定长这样（见 _remember 里 to_add.append 那几行），用来把
 # 引号里的原话抠出来，喂给 guard_model 单独判断，而不是把整条记忆日志格式的文本拿去问它
@@ -340,6 +358,10 @@ class Agent:
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
         self.compress_conversations = compress_conversations
+        # 记忆检索的两个可调项放在 Agent 上，而不只在 MemoryStore 上：每个 NPC 一个 store、
+        # 懒加载，运行时切换必须一次改到所有已加载的、以及以后才加载的（见 _mem / set_flags）
+        self.normalize_relevance = True
+        self.mmr_lambda = MMR_LAMBDA
         # 这一场对话是从什么时候开始的——压缩时用它圈出属于这场对话的那些记忆。
         # 不在字典里 = 现在没在对话中
         self.conversation_start: dict[str, float] = {}
@@ -856,6 +878,8 @@ class Agent:
         if store is None:
             path = self._memory_path(npc_id)
             store = MemoryStore.load(path) if path else MemoryStore()
+            store.normalize_relevance = self.normalize_relevance
+            store.mmr_lambda = self.mmr_lambda
             self._memories[npc_id] = store
         return store
 
@@ -1276,6 +1300,40 @@ class Agent:
         for text, emb in zip(insights, embeddings):
             store.add(f"你更深一层的体会是：{text}", IMPORTANCE_META_REFLECTION, now, embedding=emb, kind="meta_reflection")
             self.stats["meta_reflections"] += 1
+
+    # ---------- 运行时开关 ----------
+    def flags(self) -> dict:
+        """现在每个可切开关的取值。给 GET /flags 和前端面板用。"""
+        out = {name: bool(getattr(self, name)) for name in RUNTIME_BOOL_FLAGS}
+        out["mmr_lambda"] = self.mmr_lambda
+        return out
+
+    def set_flags(self, **changes) -> dict:
+        """当场改开关，不重启、不清记忆，改完对所有 NPC 立刻生效；返回改完后的全部取值。
+
+        全部校验通过才动手：一个键写错就整批拒绝，不会出现"前两个改了、第三个没改"的半截状态。
+        mmr_lambda 是 [0, 1] 的浮点数，1.0 等价于关掉 MMR（退化成纯 top-k）。"""
+        pending = {}
+        for name, value in changes.items():
+            if name in RUNTIME_BOOL_FLAGS:
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} 要的是 true/false，收到 {value!r}")
+                pending[name] = value
+            elif name == "mmr_lambda":
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0.0 <= value <= 1.0:
+                    raise ValueError(f"mmr_lambda 要的是 0~1 的数，收到 {value!r}")
+                pending[name] = float(value)
+            else:
+                raise ValueError(f"没有叫 {name} 的开关，可用：{', '.join(RUNTIME_BOOL_FLAGS)}, mmr_lambda")
+        for name, value in pending.items():
+            setattr(self, name, value)
+        # 记忆检索的两项要同步到每一个已经加载的 store；还没加载的由 _mem 在加载时补上
+        for store in self._memories.values():
+            store.normalize_relevance = self.normalize_relevance
+            store.mmr_lambda = self.mmr_lambda
+        if pending:
+            log.info("[flags] %s", ", ".join(f"{k}={v}" for k, v in pending.items()))
+        return self.flags()
 
     def memory_dump(self, npc_id: str) -> list[dict]:
         return self._mem(npc_id).dump(self.clock())
