@@ -1,7 +1,15 @@
 import asyncio
 
 from townmind import world
-from townmind.agent import IMPORTANCE_HEARD, IMPORTANCE_LESSON, IMPORTANCE_SAID, Agent, Task, _self_said_text
+from townmind.agent import (
+    IMPORTANCE_HEARD,
+    IMPORTANCE_LESSON,
+    IMPORTANCE_META_REFLECTION,
+    IMPORTANCE_SAID,
+    Agent,
+    Task,
+    _self_said_text,
+)
 from townmind.llm.base import ToolCall
 
 
@@ -1138,3 +1146,99 @@ def test_reflection_skipped_when_no_llm_configured():
     a._mem("alice").importance_since_reflection = 200.0
     decide(a, "alice", {"pos": [0.0, 0.0]})  # 走的是纯规则兜底，压根没有 LLM 可用
     assert a.stats.get("reflections", 0) == 0
+
+
+# ---------- 分层反思：反思素材换成 score() 排序，而不是纯按时间 ----------
+def test_reflection_material_uses_score_not_pure_recency():
+    """_maybe_reflect() 选材料现在走 store.recall()（新近度+重要度打分），不是单纯按时间倒序
+    取最近 REFLECTION_RECENT_K 条。这里造一个"纯按时间选材会漏掉、但按分数选材能捞回来"的
+    场景：25 条很新但完全不重要的琐事（重要度 1），加 1 条很久以前但重要度拉满的事
+    （重要度 10）。纯按时间选"最近 20 条"，这条古老但重要的事必然被挤出去（比所有 25 条
+    琐事都旧）；按新近度+重要度打分选，它的高重要度能把名次拉回前 20，材料里应该看得到它——
+    这是这次改动想要的效果，不是巧合。"""
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "你好呀"}),
+            ToolCall("reflect", {"insights": ["随便一条感想"]}),
+        ]
+    )
+    a = Agent(llm, use_reflection=True)
+    store = a._mem("alice")
+    now = a.clock()
+    for i in range(1, 26):  # 25 条很新、很不重要的琐事——纯按时间选材的话，这些会占满"最近 20 条"的名额
+        store.add(f"琐事{i}", importance=1, now=now - i)
+    store.add("很久以前发生过一件很重要的事", importance=10, now=now - 100000)  # 纯按时间选材会漏掉这条
+    store.importance_since_reflection = 200.0  # 提前攒够阈值
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert len(llm.users) >= 2, "应该触发了反思，消耗了第二次 LLM 调用"
+    reflect_prompt = llm.users[1]
+    assert "很久以前发生过一件很重要的事" in reflect_prompt
+
+
+# ---------- 分层反思：对一级反思本身再反思一层 ----------
+def test_meta_reflection_triggers_from_accumulated_reflections():
+    """_maybe_meta_reflect() 是反思的反思：攒够了一级反思（kind="reflection"）的累计重要度，
+    才会从这些一级反思里再提炼一层，不是随便什么记忆都拿来当材料。这里直接往 store 里塞够
+    分量的一级反思记忆（不走真的反思流程，控制变量），验证二级反思能触发、只拿 kind="reflection"
+    的记忆当材料（普通事件不算）、生成结果打上 kind="meta_reflection" 标签、重要度给到
+    IMPORTANCE_META_REFLECTION、统计计数对上。"""
+    llm = ScriptedLLM(
+        [
+            ToolCall("say", {"text": "你好呀"}),
+            ToolCall("reflect", {"insights": ["更深一层的体会"]}),
+        ]
+    )
+    a = Agent(llm, use_reflection=True)
+    store = a._mem("alice")
+    now = a.clock()
+    for i in range(30):  # 30 * 10 = 300，正好到 META_REFLECTION_THRESHOLD
+        store.add(f"一级感想{i}", importance=10, now=now - i, kind="reflection")
+    store.add("不相干的普通事件", importance=10, now=now, kind="event")  # 不该被当成二级反思的材料
+    store.importance_since_reflection = 0.0  # 这次不想也触发一级反思，专注测二级
+    store.importance_since_meta_reflection = 300.0
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+
+    matching = [m for m in store.memories if m.text == "你更深一层的体会是：更深一层的体会"]
+    assert len(matching) == 1
+    assert matching[0].kind == "meta_reflection"
+    assert matching[0].importance == IMPORTANCE_META_REFLECTION
+    assert a.stats["meta_reflections"] == 1
+
+    assert len(llm.users) >= 2, "应该触发了二级反思，消耗了第二次 LLM 调用"
+    meta_prompt = llm.users[1]
+    assert "不相干的普通事件" not in meta_prompt  # 材料只从 kind="reflection" 里选，不该混进普通事件
+
+
+def test_meta_reflection_not_triggered_below_threshold():
+    llm = ScriptedLLM([ToolCall("say", {"text": "你好呀"})])
+    a = Agent(llm, use_reflection=True)  # 全新的 store，一级反思攒得还远不够
+    a.hear_player("你好", [1.0, 0.0])
+    asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert llm.calls == []  # 没有多消耗一次 reflect 调用
+    assert a.stats.get("meta_reflections", 0) == 0
+
+
+def test_meta_reflection_failure_resets_counter_without_crashing_decide():
+    class Boom:
+        calls = 0
+
+        async def choose_tool(self, system, user, tools):
+            self.calls += 1
+            if self.calls == 1:
+                return ToolCall("say", {"text": "你好呀"})
+            raise RuntimeError("down")  # 二级反思这次调用直接炸
+
+    a = Agent(Boom(), use_reflection=True)
+    store = a._mem("alice")
+    now = a.clock()
+    for i in range(30):
+        store.add(f"一级感想{i}", importance=10, now=now - i, kind="reflection")
+    store.importance_since_reflection = 0.0
+    store.importance_since_meta_reflection = 300.0
+    a.hear_player("你好", [1.0, 0.0])
+    r = asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
+    assert r["name"] == "say"  # 主决策没受影响
+    assert store.importance_since_meta_reflection < 300.0  # 清零了，不会每轮都重新触发失败的二级反思
+    assert a.stats.get("meta_reflections", 0) == 0  # 没有真的生成二级反思记忆
