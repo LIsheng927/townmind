@@ -38,6 +38,11 @@ MMR_LAMBDA = 0.7
 # 主动分享：重要度到了这个数的记忆才值得主动跟人提起。定在 6 是因为一般的寒暄、
 # "你第一次见到某人"这类日常记录都在这之下，不会让 NPC 见谁都絮叨鸡毛蒜皮的事。
 SHARE_MIN_IMPORTANCE = 6
+# 传播衰减：每转述一手，重要度打这个折。跟 SHARE_MIN_IMPORTANCE 配合会自然产生一个
+# 有意思的性质——消息会自己"传死"：转述几次之后重要度掉到分享门槛以下，就没人再往下
+# 传了，而且越是一开始就轰动的消息传得越远。这不是硬写的规则，是两个数凑在一起的结果，
+# 具体能传几手由 evals/gossip_propagation.py 实测，不在这里拍脑袋下结论。
+HOP_IMPORTANCE_DECAY = 0.8
 
 
 def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -61,6 +66,12 @@ class Memory:
     # 只用来决定"这条记忆该不该被算进分层反思的选材/计数里"，不影响 recall() 的排序——三种
     # kind 在检索时一视同仁，都是靠新近度+重要度+相关度三项打分。
     kind: str = "event"
+    # 传播代数：这件事我是第几手知道的。0 = 亲身经历、或者当事人自己跟我说的；
+    # 1 = 听人转述的；2 = 听人转述别人转述的……小道消息传得越远越不可靠，这个数就是
+    # "传了多远"的度量。它有两个用处：重要度按代数打折（见 add()），以及提示词里把
+    # 二手消息标成"听来的，未必准"（见 agent._build_prompt），让 NPC 转述时自己带上
+    # 不确定的口吻，而不是当成亲眼所见言之凿凿地说出去。
+    hop: int = 0
     # 这件事我已经跟谁讲过了。NPC 主动跟人搭话、分享自己知道的事时用它去重——
     # 没有这个标记的话，同一件事会被翻来覆去讲给同一个人听，这是"会主动说话的 NPC"
     # 最容易露馅的地方。只记"讲给谁"，不记"讲过几次"：一次就够了。
@@ -94,10 +105,18 @@ class MemoryStore:
         self.importance_since_meta_reflection: float = 0.0  # 上次二级反思以来，新增的一级反思累计了多少重要度
 
     # ---- 存 ----
-    def add(self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event") -> None:
+    def add(
+        self, text: str, importance: int, now: float, people=(), embedding=None, kind: str = "event", hop: int = 0
+    ) -> None:
         importance = max(1, min(10, int(importance)))
+        hop = max(0, int(hop))
+        if hop:
+            # 二手消息本来就没那么当真——打折放在这里而不是调用方，是为了让"不管谁写进来的
+            # 转述，都自动比第一手轻"这件事只有一个地方说了算。至少留 1 分：再怎么传得远，
+            # 它毕竟还是件"我知道的事"，不该被压成 0 直接消失
+            importance = max(1, round(importance * HOP_IMPORTANCE_DECAY**hop))
         emb = tuple(embedding) if embedding is not None else None
-        self.memories.append(Memory(text, now, importance, frozenset(people), emb, kind))
+        self.memories.append(Memory(text, now, importance, frozenset(people), emb, kind, hop))
         self.importance_since_reflection += importance
         if kind == "reflection":
             # 只有"一级反思"才计入二级反思的累计——普通事件、和二级反思本身都不算，
@@ -286,6 +305,7 @@ class MemoryStore:
                     "people": sorted(m.people),
                     "embedding": list(m.embedding) if m.embedding is not None else None,
                     "kind": m.kind,
+                    "hop": m.hop,
                     "told_to": sorted(m.told_to),
                 }
                 for m in self.memories
@@ -315,6 +335,9 @@ class MemoryStore:
                     # 老的记忆文件（加分层反思之前存的）没有这个字段，兜底成 "event"——
                     # 不会把老记忆错当成一级反思，二级反思的计数也不会被老数据污染
                     d.get("kind", "event"),
+                    # 老的记忆文件（加传播代数之前存的）没有这个字段，兜底成 0——
+                    # 当成第一手，跟加这个功能之前的行为一致
+                    int(d.get("hop", 0)),
                     # 老的记忆文件（加主动分享之前存的）没有这个字段，兜底成空集合——
                     # 最坏的结果只是这些老记忆有可能被再讲一遍，不会崩
                     frozenset(d.get("told_to", ())),
