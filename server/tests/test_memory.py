@@ -515,3 +515,12 @@ def test_facts_hearsay_and_topic_tagged_lines_are_still_offered():
 def test_is_raw_dialogue_matches_only_the_three_wrappers():
     assert is_raw_dialogue("Bob对你说：「嗯。」") and is_raw_dialogue("你说了「嗯」") and is_raw_dialogue("你第一次见到Bob")
     assert not is_raw_dialogue("讨论了面粉涨价对销售的影响") and not is_raw_dialogue("医馆的 Dan 把钥匙弄丢了")
+
+
+def test_conversation_summaries_and_reflections_are_not_gossip():
+    s = MemoryStore()
+    s.add("我们聊了酒馆和集市，大家都觉得广场热闹", 6, NOW, {"bob"}, kind="conversation")
+    s.add("你觉得镇上的人都很关心面粉价格", 7, NOW, {"bob"}, kind="reflection")
+    assert s.shareable("carol", NOW, k=5) == []
+    s.add("集市的米价涨了三成", 9, NOW, {"player"})
+    assert [m.text for m in s.shareable("carol", NOW, k=5)] == ["集市的米价涨了三成"]

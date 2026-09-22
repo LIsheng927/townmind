@@ -1999,8 +1999,24 @@ def test_assertive_sharing_changes_the_hint_wording_only_for_important_news():
     assert "也可以不说" in b.llm.users[0]
 
 
-def test_soft_sharing_is_the_default():
+def test_assertive_sharing_is_the_default_and_soft_is_the_ablation():
     clock = FakeClock()
     a, llm = _rumor_agent(clock, ["嗯"])
     decide(a)
-    assert "也可以不说" in llm.users[0] and "这句话里就告诉" not in llm.users[0]
+    assert "这句话里就告诉" in llm.users[0]
+    b = Agent(ScriptedLLM([ToolCall("say", {"text": "嗯"})]), use_gossip=True, assertive_sharing=False, clock=clock)
+    b._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    decide(b)
+    assert "也可以不说" in b.llm.users[0] and "这句话里就告诉" not in b.llm.users[0]
+
+
+def test_env_flag_parsing():
+    import os
+    from townmind.main import _env_flag
+
+    os.environ.pop("TOWNMIND_X", None)
+    assert _env_flag("TOWNMIND_X") is False and _env_flag("TOWNMIND_X", default=True) is True
+    for raw, want in [("1", True), ("true", True), ("yes", True), ("0", False), ("false", False), ("", None)]:
+        os.environ["TOWNMIND_X"] = raw
+        assert _env_flag("TOWNMIND_X", default=True) is (True if want is None else want), raw
+    os.environ.pop("TOWNMIND_X", None)

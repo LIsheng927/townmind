@@ -472,7 +472,8 @@ class MemoryStore:
           2. 还没跟这个人讲过（told_to）——不然同一件事会翻来覆去讲给同一个人听；
           3. 这个人自己不在这条记忆里（other not in people）——不要把对方刚说过的话
              当成新鲜事讲回给ta听，这是最容易让人出戏的一种；
-          4. 是件事、不是对话原文（is_raw_dialogue）——除非它带 topic 或是 hop>=1 的传闻。
+          4. 是件事、不是对话原文（is_raw_dialogue）——除非它带 topic 或是 hop>=1 的传闻；
+          5. 是 event 类——对话摘要和反思是"我经历过什么"，不是可以讲给别人的新闻。
 
         排序复用 score()（新近度+重要度），不带 query_embedding：这里问的是"我手上有什么
         值得说的事"，不是"跟此刻的话题有多相关"——相关性该由大模型看着当下的对话自己判断，
@@ -486,6 +487,10 @@ class MemoryStore:
             # 第四层：得是件"事"，不是一句对话原文（见 is_raw_dialogue）。带 topic 的（悄悄话
             # 及其每一手转述）和 hop>=1 的（别人以传闻口吻告诉我的）例外——那正是要传的东西
             and (m.topic or m.hop >= 1 or not is_raw_dialogue(m.text))
+            # 第五层：对话摘要（kind=conversation）和反思不是新闻。清空记忆重跑一次，39 条
+            # "没说出口"里 31 条候选是「我们聊了酒馆和集市，大家都觉得广场热闹」这种摘要——
+            # 把"我跟谁聊了什么"当事讲给第三个人，模型不肯说是对的
+            and (m.topic or m.kind == "event")
         ]
         pool.sort(key=lambda m: self.score(m, frozenset(), now), reverse=True)
         return pool[: max(0, k)]
