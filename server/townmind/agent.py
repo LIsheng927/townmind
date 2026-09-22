@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from . import fallback, policy, safety, world
 from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
-from .memory import Memory, MemoryStore, format_age
+from .memory import Memory, MemoryStore, _cosine, format_age
 from .personas import DEFAULT_PERSONA, PERSONAS
 from .spatial import SpatialGrid
 
@@ -184,6 +184,7 @@ REFLECT_TOOL = {
 }
 IMPORTANCE_REFLECTION = 9  # 反思本身是提炼出来的高层认识，比一般琐事更值得记住
 REFLECTION_RECENT_K = 20  # 反思时回顾最近这么多条记忆
+LORE_TOP_K = 3  # "镇上的事"语义检索之后，最多留几条塞进提示词
 
 
 @dataclass
@@ -245,6 +246,7 @@ class Agent:
         # 没传（比如没配 OPENAI_API_KEY）时为 None，_remember/recall 里据此优雅退化，
         # 记忆的"相关度"这一项从语义相似度变回"认不认人"，不影响别的功能。
         self.embedder = embedder
+        self._lore_embeddings: list[list[float] | None] | None = None  # world.TOWN_FACTS 的向量，懒加载、全 NPC 共用一份
         self.dynamic_importance = dynamic_importance
         self.use_reflection = use_reflection
         self.expressive_dialogue = expressive_dialogue
@@ -354,18 +356,20 @@ class Agent:
         status = self._say_status(npc_id, now)
         # 回忆：只取和眼前的人最相关、最重要、最新的几条。要在写入本轮新记忆之前取，避免"想起"刚发生的事
         involved = {o for o, _ in nearby} | {e.speaker for e in heard}
-        # 语义相关度要拿"此刻在聊什么"去跟每条记忆算相似度，所以得先把当前情境也变成一个向量；
-        # 没配 embedder、或者这一轮啥也没听到附近也没人，都不会真的发一次网络请求
-        query_embedding = await self._embed_query(heard, nearby) if self.use_memory else None
+        # 语义相关度要拿"此刻在聊什么"去跟每条记忆/世界设定算相似度，所以得先把当前情境变成一个
+        # 向量；没配 embedder、或者这一轮啥也没听到附近也没人，都不会真的发一次网络请求。
+        # 记忆和"镇上的事"共用同一个 query_embedding——都是同一套"这一刻在聊什么"，没必要算两次
+        query_embedding = await self._embed_query(heard, nearby) if (self.use_memory or self.use_lore) else None
         recalled = (
             self._mem(npc_id).recall(involved, now, query_embedding=query_embedding) if self.use_memory else []
         )
+        relevant_town_facts = await self._select_town_facts(query_embedding) if self.use_lore else None
 
         action, source = None, "fallback"
         if self.llm is not None:
             if interesting and status == "ok":
                 # 只有这一种情况才花钱问大模型
-                action, source = await self._ask_llm(npc_id, heard, nearby, recalled, now)
+                action, source = await self._ask_llm(npc_id, heard, nearby, recalled, now, relevant_town_facts)
                 if source == "llm" and "output" in self.safety_layers:
                     action, source = await self._guard_output(npc_id, action, heard, nearby, status)
             elif interesting and status == "cooldown":
@@ -431,12 +435,12 @@ class Agent:
         log.info("[%s] %s -> %s%s", npc_id, source, action, "  (end_conversation)" if ended else "")
         return action
 
-    async def _ask_llm(self, npc_id, heard, nearby, recalled, now):
+    async def _ask_llm(self, npc_id, heard, nearby, recalled, now, relevant_town_facts=None):
         if not self.breaker.allow():
             # 熔断中：大模型服务最近连续出问题，直接走兜底，不发请求
             self.stats["breaker_skipped"] += 1
             return None, "fallback"
-        system, user = self._build_prompt(npc_id, heard, nearby, recalled, now)
+        system, user = self._build_prompt(npc_id, heard, nearby, recalled, now, relevant_town_facts)
         tools = self._tools_for(npc_id)
         self.stats["llm_calls"] += 1
         try:
@@ -635,6 +639,28 @@ class Agent:
         vectors = await self._embed_texts([text])
         return vectors[0]
 
+    async def _select_town_facts(self, query_embedding: list[float] | None) -> tuple[str, ...] | None:
+        """"镇上的事"跟记忆一样换成语义检索：world.TOWN_FACTS 只在向量算成功过至少一次之后才会
+        被筛选，没有 query（没听到话、附近也没人）或者没配 embedder 时返回 None——world.
+        describe_surroundings 看到 None 就照旧把 TOWN_FACTS 全塞进去，设定本来就没几条，
+        这种时候不筛也无所谓。"""
+        if query_embedding is None or self.embedder is None:
+            return None
+        if self._lore_embeddings is None:
+            embeddings = await self._embed_texts(list(world.TOWN_FACTS))
+            if not any(e is not None for e in embeddings):
+                return None  # 这次没算成，不缓存失败结果，下次再试
+            self._lore_embeddings = embeddings
+        scored = [
+            (text, _cosine(tuple(query_embedding), tuple(emb)))
+            for text, emb in zip(world.TOWN_FACTS, self._lore_embeddings)
+            if emb is not None
+        ]
+        if not scored:
+            return None
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return tuple(text for text, _ in scored[:LORE_TOP_K])
+
     async def _call_llm_tool(self, npc_id: str, system: str, user: str, tool: dict, stat_key: str) -> ToolCall | None:
         """给"打重要度分""反思"这类可选的辅助 LLM 调用复用：走跟主决策一样的并发限流
         （self._llm_slots），记账进同一套 token 统计（真金白银花出去的成本，不能漏记），
@@ -783,7 +809,9 @@ class Agent:
             names.append("follow_player")
         return _tool_schemas(tuple(names))
 
-    def _build_prompt(self, npc_id, heard, nearby, recalled: list[Memory], now: float) -> tuple[str, str]:
+    def _build_prompt(
+        self, npc_id, heard, nearby, recalled: list[Memory], now: float, relevant_town_facts=None
+    ) -> tuple[str, str]:
         p = PERSONAS.get(npc_id, DEFAULT_PERSONA)
         task = self.tasks.get(npc_id)
         habits = p.get("speech_habits") if self.expressive_dialogue else None
@@ -833,7 +861,9 @@ class Agent:
         me = self.positions.get(npc_id, (0.0, 0.0))
         nearby_text = [f"{_name(o)}（距离 {d:.1f} 米）" for o, d in nearby]
         surroundings = (
-            world.describe_surroundings(me) if self.use_lore else [f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})"]
+            world.describe_surroundings(me, town_facts=relevant_town_facts)
+            if self.use_lore
+            else [f"你现在的位置：({me[0]:.1f}, {me[1]:.1f})"]
         )
         lines = surroundings + [
             f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",

@@ -764,8 +764,11 @@ class FakeEmbedder:
 
 
 def test_new_memories_get_embedded_in_one_batched_call():
+    # use_lore=False：这里测的是记忆批量 embedding 的行为，跟世界设定检索是两回事——
+    # 世界设定检索第一次调用时会额外触发一次 TOWN_FACTS 的缓存 embedding，混进来会破坏
+    # 这条测试想验证的"就该是 2 次"这个不变量
     embedder = FakeEmbedder()
-    a = Agent(FakeLLM(ToolCall("say", {"text": "要不要来块面包？"})), embedder=embedder)
+    a = Agent(FakeLLM(ToolCall("say", {"text": "要不要来块面包？"})), embedder=embedder, use_lore=False)
     a.hear_player("这把剑真好看", [1.0, 0.0])
     asyncio.run(a.decide("alice", {"pos": [0.0, 0.0]}))
     # 一次是回忆用的 query embedding（只有一段文字），一次是这一轮新记忆的批量 embedding——

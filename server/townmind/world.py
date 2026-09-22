@@ -3,8 +3,11 @@
 这是 NPC 聊天和行动的事实来源：NPC 只能聊这里写到的东西，避免大模型凭空编造。
 想修改小镇，只改这个文件：加地点、改事实都行。
 
-当前用最简单的方式挑选"和 NPC 此刻相关的设定"：人在哪个地点，就给哪个地点的信息，
-再加上镇上的公共事实。设定变多之后，第二小步会换成向量检索（RAG）。
+当前所在地点的信息（描述 + 这个地点自己的 facts）始终全给——人已经站在那儿了，跟"此刻在聊
+什么"无关，条数也一直很少，不用筛。"镇上的事"（TOWN_FACTS）不一样：不跟地点绑定、会持续
+变多，所以由 agent.py 在有 embedder、且这一轮有 query（听到话或附近有人）时，跟记忆用同一套
+语义检索先筛出最相关的几条，再传进 describe_surroundings；没有 query 或没配 embedder 时，
+这里退回最初的做法——全部塞进去。
 """
 import math
 import random
@@ -78,6 +81,10 @@ LOCATIONS: tuple[Location, ...] = (
 TOWN_FACTS: tuple[str, ...] = (
     "小镇很小，主要就是面包店、铁匠铺和广场这三个地方。",
     "旅行商人 Carol 刚到小镇不久，还不太熟悉这里。",
+    "镇长每个月都会来广场巡视一圈，顺便查看一下治安。",
+    "小镇建立差不多有五十年了，最早只有铁匠铺一家店，后来才慢慢热闹起来。",
+    "小镇治安一向很好，镇上几乎没出过什么偷盗案件。",
+    "小镇没有自己的医馆，谁生病了都要去邻镇看大夫。",
 )
 
 
@@ -127,8 +134,13 @@ def location_at(pos: tuple[float, float], radius: float = AT_RADIUS) -> Location
     return loc if d <= radius else None
 
 
-def describe_surroundings(pos: tuple[float, float]) -> list[str]:
-    """给提示词用：NPC 此刻所处位置的相关设定 + 镇上的公共事实。"""
+def describe_surroundings(pos: tuple[float, float], town_facts: tuple[str, ...] | None = None) -> list[str]:
+    """给提示词用：NPC 此刻所处位置的相关设定 + 镇上的事。
+
+    town_facts：调用方（agent.py）语义检索之后筛出来的子集；传 None 时退回旧行为——
+    TOWN_FACTS 全部塞进去。不传空元组和传 None 是两回事：空元组就是"筛完一条都不相关"，
+    照样什么都不加；None 才是"没筛，别管我，全给"。
+    """
     lines: list[str] = []
     loc = location_at(pos)
     if loc is not None:
@@ -139,9 +151,10 @@ def describe_surroundings(pos: tuple[float, float]) -> list[str]:
     else:
         near, d = nearest_location(pos)
         lines.append(f"你现在在小镇的空地上，离{near.name}最近（约 {d:.0f} 米）。")
-    if TOWN_FACTS:
+    facts = TOWN_FACTS if town_facts is None else town_facts
+    if facts:
         lines.append("镇上的事：")
-        lines += [f"- {f}" for f in TOWN_FACTS]
+        lines += [f"- {f}" for f in facts]
     return lines
 
 
