@@ -12,6 +12,7 @@ from .agent import Agent
 from .guard_model import ENV_ENABLE, GuardModel
 from .llm.embeddings import make_embedder
 from .llm.factory import make_client
+from .personas import roster_payload
 from .protocol import Envelope
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -157,6 +158,7 @@ async def ws_endpoint(ws: WebSocket) -> None:
                             "version": "0.3.0",
                             "locations": world.locations_payload(),
                             "items": world.items_payload(),
+                            "npcs": roster_payload(),
                         },
                     )
                 )

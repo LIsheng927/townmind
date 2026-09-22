@@ -156,3 +156,13 @@ PERSONAS: dict[str, dict] = {
 }
 PERSONAS["player"] = {"name": "玩家", "home": "", "persona": "", "lines": {}}  # 玩家不是 NPC，只是让提示词里显示"玩家"
 DEFAULT_PERSONA = {"name": "路人", "home": "", "persona": "你是小镇里的普通居民。"}
+
+
+def roster_payload() -> list[dict]:
+    """发给客户端的 NPC 名单（id、显示名、住哪儿）。网页 demo 靠这个知道要驱动哪些人，
+    不用在 JS 里再抄一份——名单只维护这一处，加减 NPC 时前端自动跟上。"""
+    return [
+        {"id": npc_id, "name": p["name"], "home": p.get("home", "")}
+        for npc_id, p in PERSONAS.items()
+        if npc_id != "player"
+    ]
