@@ -1481,3 +1481,82 @@ def test_gossip_hint_not_marked_told_when_npc_stays_silent():
     decide(a)
     assert a.stats.get("shares_told", 0) == 0
     assert a._mem("alice").shareable("bob", a.clock(), k=1) != []
+
+
+# ---------- 消息传播：听来的消息是第几手 ----------
+def _rumor_agent(clock, replies):
+    """alice 知道一件够分量的事，bob 就在旁边。"""
+    llm = ScriptedLLM([ToolCall("say", {"text": t}) for t in replies])
+    a = Agent(llm, use_gossip=True, clock=clock)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    return a, llm
+
+
+def test_speech_that_passes_on_a_rumor_is_heard_as_second_hand():
+    """alice 带着"可以提一句"的候选说话 -> bob 听到 -> bob 记的这条是第二手。"""
+    clock = FakeClock()
+    a, _ = _rumor_agent(clock, ["听说米价涨了三成", "是吗"])
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert len(heard) == 1
+    assert heard[0].hop == 1
+
+
+def test_ordinary_reply_is_recorded_as_first_hand():
+    """没有转述任何消息的普通回应，听到的人记成第一手——当事人亲口说的，没有中间商。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("say", {"text": "早"})])
+    a = Agent(llm, use_gossip=True, clock=clock)  # alice 手上没有够分量的消息可转述
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert len(heard) == 1
+    assert heard[0].hop == 0
+
+
+def test_second_hand_memory_is_less_important_than_first_hand():
+    clock = FakeClock()
+    a, _ = _rumor_agent(clock, ["听说米价涨了三成", "是吗"])
+    decide(a, "alice")
+    decide(a, "bob")
+    second_hand = [m for m in a._mem("bob").memories if "对你说" in m.text][0]
+    assert second_hand.importance < IMPORTANCE_HEARD  # 二手消息打过折了
+    assert a.stats["heard_hop_1"] == 1
+
+
+def test_second_hand_memory_is_flagged_as_hearsay_in_the_prompt():
+    """整条传播链上真正防幻觉的一环：不标的话，NPC 会把传了几手的传闻当成亲眼所见，
+    言之凿凿地再传下去，观感跟"编造不存在的事"是一样的。"""
+    clock = FakeClock()
+    a, llm = _rumor_agent(clock, ["听说米价涨了三成", "是吗", "嗯"])
+    decide(a, "alice")
+    decide(a, "bob")
+    clock.t += 10  # 越过说话冷却，让 bob 再决策一次
+    decide(a, "bob")
+    assert "辗转听来的传闻" in llm.users[2]
+
+
+def test_first_hand_memories_are_not_flagged_as_hearsay():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "早上好"}), ToolCall("say", {"text": "早"}), ToolCall("say", {"text": "嗯"})])
+    a = Agent(llm, use_gossip=True, clock=clock)
+    decide(a, "alice")
+    decide(a, "bob")
+    clock.t += 10
+    decide(a, "bob")
+    assert "辗转听来的传闻" not in llm.users[2]
+
+
+def test_hop_is_zero_when_gossip_is_off():
+    """没开 use_gossip 时不存在"转述"这回事，所有听到的话都是第一手，
+    行为跟加这个功能之前完全一致。"""
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("say", {"text": "听说米价涨了三成"}), ToolCall("say", {"text": "是吗"})])
+    a = Agent(llm, clock=clock)
+    a._mem("alice").add("集市的米价涨了三成", importance=9, now=clock())
+    decide(a, "alice")
+    decide(a, "bob")
+    heard = [m for m in a._mem("bob").memories if "对你说" in m.text]
+    assert heard[0].hop == 0
+    assert a.stats.get("heard_hop_1", 0) == 0

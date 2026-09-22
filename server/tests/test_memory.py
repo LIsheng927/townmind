@@ -1,4 +1,11 @@
-from townmind.memory import MemoryStore, format_age
+import json
+
+from townmind.memory import (
+    HOP_IMPORTANCE_DECAY,
+    SHARE_MIN_IMPORTANCE,
+    MemoryStore,
+    format_age,
+)
 
 NOW = 1000.0
 
@@ -178,3 +185,117 @@ def test_load_old_file_without_reflection_field_defaults_to_zero(tmp_path):
     loaded = MemoryStore.load(path)
     assert loaded.importance_since_reflection == 0.0
     assert not loaded.should_reflect()
+
+
+# ---------- 主动分享：挑"值得跟这个人说、而且还没说过"的事 ----------
+def share_store() -> MemoryStore:
+    s = MemoryStore()
+    s.add("集市的米价涨了三成", 8, NOW)  # 够重要、跟 bob 无关
+    s.add("今天天气不错", 2, NOW)  # 不够重要
+    s.add("Bob 说他很忙", 9, NOW, {"bob"})  # bob 自己就在这条记忆里
+    return s
+
+
+def test_shareable_filters_by_importance_and_involvement():
+    picked = share_store().shareable("bob", NOW, k=5)
+    assert [m.text for m in picked] == ["集市的米价涨了三成"]
+
+
+def test_shareable_threshold_is_inclusive():
+    s = MemoryStore()
+    s.add("刚好到阈值", SHARE_MIN_IMPORTANCE, NOW)
+    s.add("差一点", SHARE_MIN_IMPORTANCE - 1, NOW)
+    assert [m.text for m in s.shareable("bob", NOW, k=5)] == ["刚好到阈值"]
+
+
+def test_marked_as_told_is_not_offered_again():
+    s = share_store()
+    picked = s.shareable("bob", NOW, k=1)
+    s.mark_told(picked[0], "bob")
+    assert s.shareable("bob", NOW, k=1) == []
+
+
+def test_told_to_is_tracked_per_person():
+    """跟 bob 讲过不等于跟 carol 也讲过；而且"Bob 说他很忙"这条对 carol 是可以讲的
+    （对 bob 自己不行）——这正是八卦该有的样子。"""
+    s = share_store()
+    s.mark_told(s.shareable("bob", NOW, k=1)[0], "bob")
+    carol_can_hear = [m.text for m in s.shareable("carol", NOW, k=5)]
+    assert "集市的米价涨了三成" in carol_can_hear
+    assert "Bob 说他很忙" in carol_can_hear
+
+
+def test_shareable_ranked_by_score_and_respects_k():
+    s = MemoryStore()
+    s.add("旧的重要事", 7, NOW - 5000)
+    s.add("新的重要事", 7, NOW)
+    assert s.shareable("bob", NOW, k=1)[0].text == "新的重要事"
+    assert len(s.shareable("bob", NOW, k=2)) == 2
+    assert s.shareable("bob", NOW, k=0) == []
+
+
+# ---------- 传播代数：消息传得越远越不当真 ----------
+def test_second_hand_memory_is_discounted():
+    s = MemoryStore()
+    s.add("第一手", 9, NOW, hop=0)
+    s.add("第二手", 9, NOW, hop=1)
+    first, second = s.memories
+    assert first.importance == 9
+    assert second.importance == round(9 * HOP_IMPORTANCE_DECAY)
+    assert second.importance < first.importance
+
+
+def test_importance_never_decays_to_zero():
+    """再怎么传得远，它毕竟还是件"我知道的事"，不该被压成 0 直接消失。"""
+    s = MemoryStore()
+    s.add("传了很多手", 9, NOW, hop=50)
+    assert s.memories[0].importance == 1
+
+
+def test_rumor_dies_out_after_enough_hops():
+    """有意思的涌现性质：消息会自己"传死"——转述几次之后重要度掉到分享门槛以下，
+    就没人再往下传了。这不是硬写的规则，是衰减和门槛两个数凑在一起的结果。"""
+    s = MemoryStore()
+    for hop in range(6):
+        s.add(f"传了{hop}手", 9, NOW, hop=hop)
+    still_worth_telling = [m.hop for m in s.memories if m.importance >= SHARE_MIN_IMPORTANCE]
+    assert still_worth_telling == [0, 1, 2]  # 第 3 手开始就没人愿意再传了
+    assert all(m.importance < SHARE_MIN_IMPORTANCE for m in s.memories if m.hop >= 3)
+
+
+def test_hop_is_clamped_to_non_negative():
+    s = MemoryStore()
+    s.add("负数代数", 9, NOW, hop=-3)
+    assert s.memories[0].hop == 0
+    assert s.memories[0].importance == 9
+
+
+# ---------- 落盘 ----------
+def test_hop_and_told_to_survive_roundtrip(tmp_path):
+    s = MemoryStore()
+    s.add("集市的米价涨了三成", 9, NOW, hop=1)
+    s.mark_told(s.memories[0], "bob")
+    path = tmp_path / "m.json"
+    s.save(path)
+    loaded = MemoryStore.load(path)
+    assert loaded.memories[0].hop == 1
+    assert loaded.memories[0].told_to == frozenset({"bob"})
+    assert loaded.shareable("bob", NOW, k=1) == []  # 读回来之后照样不会再讲给 bob
+
+
+def test_old_memory_file_without_new_fields_still_loads(tmp_path):
+    """老的记忆文件没有 hop / told_to 字段，要能读进来并退化成"第一手、没跟谁讲过"，
+    跟加这两个功能之前的行为一致。"""
+    s = MemoryStore()
+    s.add("老记忆", 7, NOW)
+    path = tmp_path / "m.json"
+    s.save(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for d in raw["memories"]:
+        d.pop("hop", None)
+        d.pop("told_to", None)
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    loaded = MemoryStore.load(path)
+    assert len(loaded.memories) == 1
+    assert loaded.memories[0].hop == 0
+    assert loaded.memories[0].told_to == frozenset()
