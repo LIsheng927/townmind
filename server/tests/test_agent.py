@@ -7,6 +7,7 @@ from townmind.agent import (
     IMPORTANCE_LESSON,
     IMPORTANCE_META_REFLECTION,
     IMPORTANCE_SAID,
+    SHARE_ASSERTIVE_IMPORTANCE,
     SHARE_GIVE_UP_AFTER,
     Agent,
     Task,
@@ -1994,7 +1995,7 @@ def test_assertive_sharing_changes_the_hint_wording_only_for_important_news():
     assert "这句话里就告诉" in llm.users[0]
     # 不够重要的事照旧软提示
     b = Agent(ScriptedLLM([ToolCall("say", {"text": "嗯"})]), use_gossip=True, assertive_sharing=True, clock=clock)
-    b._mem("alice").add("路边有只猫", importance=6, now=clock())
+    b._mem("alice").add("路边有只猫", importance=SHARE_ASSERTIVE_IMPORTANCE - 1, now=clock())
     decide(b)
     assert "也可以不说" in b.llm.users[0]
 
@@ -2020,3 +2021,11 @@ def test_env_flag_parsing():
         os.environ["TOWNMIND_X"] = raw
         assert _env_flag("TOWNMIND_X", default=True) is (True if want is None else want), raw
     os.environ.pop("TOWNMIND_X", None)
+
+
+def test_assertive_threshold_covers_the_first_two_hops_of_a_whisper():
+    """重要度 9 的悄悄话逐手打折 9 → 7 → 6：前两跳硬推，第三跳起软提示、自然消退。"""
+    from townmind.memory import retold_importance
+
+    first, second = retold_importance(9), retold_importance(retold_importance(9))
+    assert first >= SHARE_ASSERTIVE_IMPORTANCE > second
