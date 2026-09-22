@@ -35,10 +35,16 @@ def test_repetition_rate_counts_own_repeats_only():
 
 def test_invented_mentions():
     assert metrics.invented_mentions("小镇的面包节快到了")  # 设定里没有面包节
-    assert metrics.invented_mentions("去逛逛新开的酒馆")
+    assert metrics.invented_mentions("去逛逛新开的医馆")  # 设定里明确写了小镇没有医馆
+    assert metrics.invented_mentions("镇上开了家茶馆")
+    # 下面这些都是设定里真有的地点，加新地点时不用回来改这个测试：
+    # metrics.ALLOWED_TERMS 本来就是从 world.LOCATIONS 生成的
     assert not metrics.invented_mentions("我去面包店买法棍")
     assert not metrics.invented_mentions("我去铁匠铺看看")
     assert not metrics.invented_mentions("周六的集市你去吗")
+    assert not metrics.invented_mentions("去酒馆喝碗麦酒")
+    assert not metrics.invented_mentions("磨坊今天还在转")
+    assert not metrics.invented_mentions("杂货铺有蜡烛卖")
 
 
 def test_invented_and_grounded_rates():
