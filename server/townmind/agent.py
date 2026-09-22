@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from . import fallback, policy, safety, world
 from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
-from .memory import MMR_LAMBDA, Memory, MemoryStore, _cosine, format_age, retold_importance
+from .memory import MMR_LAMBDA, Memory, MemoryStore, _cosine, conveys, format_age, retold_importance
 from .personas import DEFAULT_PERSONA, PERSONAS
 from .social import RelationshipBook
 from .spatial import SpatialGrid
@@ -68,6 +68,10 @@ IMPORTANCE_FAREWELL = 5
 IMPORTANCE_SAID = 4  # 我自己说的话
 # 走路和休息不值得记：占位置、没信息量，所以不存
 MAX_SAYS_PER_WINDOW = 3  # 窗口内最多说几句，说满就该走开去忙别的，避免无限聊天烧钱
+
+# 一件事给同一个人提示了这么多次、大模型一次都没说出口，就不再提了：可能是话题
+# 实在接不上，也可能是它觉得不该说。放弃比每一轮都在提示词里挂着同一条强。
+SHARE_GIVE_UP_AFTER = 3
 
 # 运行时可以切的开关（见 flags / set_flags）。这份名单是 demo 的骨架：演示的不是 NPC 聊天，
 # 是"同一个小镇、同一个问题，把某项技术关掉会怎样"——所以每个开关都必须能在服务不重启的
@@ -381,6 +385,8 @@ class Agent:
         # 没有这个，面板上"相关度全是 0"看起来像坏了——其实只是这一轮附近没人、也没
         # 听到话，query 为空，相关度按规则退化成"认不认人"，而"人"是空集
         self.last_query: dict[str, dict] = {}
+        # (npc, 听的人, 那件事) -> 提示过几次都没讲出口，见 SHARE_GIVE_UP_AFTER
+        self._share_ignored: dict[tuple[str, str, str], int] = defaultdict(int)
         self.trace: list[dict] | None = None  # 不为 None 时，每次决策都记一笔，供评测使用
         self.timeout = timeout
         self.breaker = breaker or CircuitBreaker(clock=clock)
@@ -658,23 +664,31 @@ class Agent:
 
         self.stats[source] += 1
         if action["name"] == "say":
-            # 这一轮如果是带着"可以提一句"的候选去说话的，就把那条消息的代数挂在这次发言上，
-            # 听到的人才知道自己听到的是第几手（见 _remember 里的 hop）
+            # 带着"可以提一句"的候选去说话，只有这句话真的把那件事讲出去了（见 memory.conveys），
+            # 才把消息的代数和 topic 挂在这次发言上——听到的人据此知道自己听的是第几手。
+            # 之前是"给过候选、这轮说了话"就算讲过：一句问候会顶着传闻的标签传出去，
+            # 追踪面板显示全镇都知道、其实没人知道。
+            conveyed = share_hint is not None and conveys(share_hint[1].text, action["text"])
             self._record_speech(
                 npc_id, action["text"], now,
-                source_hop=share_hint[1].hop if share_hint is not None else None,
-                source_importance=share_hint[1].importance if share_hint is not None else None,
-                source_topic=share_hint[1].topic if share_hint is not None else "",
+                source_hop=share_hint[1].hop if conveyed else None,
+                source_importance=share_hint[1].importance if conveyed else None,
+                source_topic=share_hint[1].topic if conveyed else "",
             )
             if share_hint is not None:
-                # 提示词里给过这条候选、而且这一轮确实说话了，就记成"跟ta讲过了"。
-                # 严格说我们并不知道大模型到底有没有真的把这件事说出口（生成的是自由文本，
-                # 逐字去比对既脆弱又不准）；但这个标记要解决的问题是"同一件事别翻来覆去跟
-                # 同一个人讲"，按"给过机会就算讲过"来记，正好达到这个目的，代价只是偶尔
-                # 有一件事没被说出口就不再提了——比起车轱辘话，这个代价更划算。
                 other, mem = share_hint
-                self._mem(npc_id).mark_told(mem, other)
-                self.stats["shares_told"] += 1
+                if conveyed:
+                    self._mem(npc_id).mark_told(mem, other)
+                    self.stats["shares_told"] += 1
+                else:
+                    # 没说出口：不算讲过，下一轮还会提示；但提示了 SHARE_GIVE_UP_AFTER 次
+                    # 都没说，就当讲过了——别让同一条永远挂在提示词里
+                    self.stats["share_hints_ignored"] += 1
+                    key = (npc_id, other, mem.text)
+                    self._share_ignored[key] += 1
+                    if self._share_ignored[key] >= SHARE_GIVE_UP_AFTER:
+                        self._mem(npc_id).mark_told(mem, other)
+                        self.stats["shares_given_up"] += 1
 
         if self.use_memory:
             await self._remember(npc_id, now, heard, nearby, action, ended)
