@@ -133,15 +133,17 @@ class MemoryStore:
         return sum(self.component_scores(m, involved, now, query_embedding))
 
     def recall(self, involved, now: float, k: int = DEFAULT_TOP_K, query_embedding=None) -> list[Memory]:
-        return self._rank(involved, now, k, query_embedding)
+        return [m for m, _ in self._rank_with_components(involved, now, k, query_embedding)]
 
     def recall_explained(self, involved, now: float, k: int = DEFAULT_TOP_K, query_embedding=None) -> list[dict]:
         """跟 recall() 排序逻辑完全一致，只是把三项子分数也一起带出来——调试和演示专用。
-        recall() 本身的返回值（list[Memory]）不变，不影响任何现有调用方。"""
-        picked = self._rank(involved, now, k, query_embedding)
+        这里的三项子分数是实际参与排序的版本（见 _ranking_components() 的归一化），不是
+        component_scores() 的原始版本；两者在没有语义检索、或候选里带向量的不到两条时
+        完全一样，带了归一化才会不同。recall() 本身的返回值（list[Memory]）不变，不影响
+        任何现有调用方。"""
+        picked = self._rank_with_components(involved, now, k, query_embedding)
         out = []
-        for m in picked:
-            recency, importance, relevance = self.component_scores(m, involved, now, query_embedding)
+        for m, (recency, importance, relevance) in picked:
             out.append(
                 {
                     "text": m.text,
@@ -153,22 +155,58 @@ class MemoryStore:
             )
         return out
 
-    def _rank(self, involved, now: float, k: int, query_embedding=None) -> list[Memory]:
-        """recall() / recall_explained() 共用的排序逻辑：先按三项加权总分排一次序；如果这次
-        查询带了语义向量、而且候选里至少两条记忆有 embedding，再用 MMR 重排一遍 top-k——纯按
-        分数排序不会管"选出来的这几条彼此像不像"，好几条内容高度相似的记忆可能会一起挤进来，
-        占掉本该属于"另一件事"的名额，MMR 是检索里处理这个问题的经典做法。没配 embedding、
-        或者候选里带向量的不到两条，直接退化成原来的纯 top-k，不影响没接语义检索时的行为。"""
-        scored = [(m, self.score(m, involved, now, query_embedding)) for m in self.memories]
-        scored.sort(key=lambda pair: pair[1], reverse=True)
+    def _ranking_components(
+        self, involved, now: float, query_embedding=None
+    ) -> list[tuple[Memory, tuple[float, float, float]]]:
+        """跟 component_scores() 算的是同一件事，多做一步：如果这次查询带了语义向量，把候选里
+        "真的算出了语义相关度"（不是退化成认不认人）的那些，按这批候选自己的相关度分布做一次
+        min-max 归一化，再参与排序。
+
+        为什么要归一化：新近度、重要度天然就能取到 0~1 的整个量程（重要度 1~10 直接映射，
+        新近度随时间自然衰减到 0）。但相关度不是——实测过一次：同一批候选里，明显对题的一条
+        相关度是 0.48，两条完全不对题的分别是 0.12、0.14，真实 embedding 对同一种口吻、同一批
+        短句算出来的余弦相似度，哪怕内容完全不沾边也有个不低的基线，"最相关"和"完全不相关"之间
+        实际拉开的分差，往往比 0~1 这个理论量程窄得多。不归一化的话，相关度会被新近度、重要度
+        这两项系统性地压过——哪怕某条记忆明显更对题，"新且重要"的干扰项还是能赢（这正是
+        evals/memory_ablation.py 用真实 embedding 跑出来、offline 假向量没测出来的问题）。
+
+        只对这次查询里"真的有 embedding 可比"的候选做归一化（不到两条candidate带向量时不归一化，
+        参见下面 recall_explained 的行为，跟没开语义检索一样），退化成认不认人（0 或 1）的候选
+        不参与，因为那不是同一种尺度的信号。component_scores()/score() 本身不做这一步，保持成
+        一个跟"这次候选池长什么样"无关的、确定性的单条记忆打分（capacity 淘汰用的就是这个，
+        淘汰时没有 query_embedding，不受这次改动影响）。"""
+        raw = [[m, list(self.component_scores(m, involved, now, query_embedding))] for m in self.memories]
+        if query_embedding is not None:
+            embedded = [i for i, (m, _) in enumerate(raw) if m.embedding is not None]
+            if len(embedded) >= 2:
+                rels = [raw[i][1][2] for i in embedded]
+                lo, hi = min(rels), max(rels)
+                if hi - lo > 1e-9:
+                    for i in embedded:
+                        raw[i][1][2] = (raw[i][1][2] - lo) / (hi - lo)
+        return [(m, tuple(comps)) for m, comps in raw]
+
+    def _rank_with_components(
+        self, involved, now: float, k: int, query_embedding=None
+    ) -> list[tuple[Memory, tuple[float, float, float]]]:
+        """recall() / recall_explained() 共用的排序逻辑：先按三项加权总分（用的是
+        _ranking_components() 归一化之后的版本）排一次序；如果这次查询带了语义向量、而且
+        候选里至少两条记忆有 embedding，再用 MMR 重排一遍 top-k——纯按分数排序不会管"选出来
+        的这几条彼此像不像"，好几条内容高度相似的记忆可能会一起挤进来，占掉本该属于"另一件
+        事"的名额，MMR 是检索里处理这个问题的经典做法。没配 embedding、或者候选里带向量的
+        不到两条，直接退化成原来的纯 top-k，不影响没接语义检索时的行为。"""
+        scored = [(m, comps, sum(comps)) for m, comps in self._ranking_components(involved, now, query_embedding)]
+        scored.sort(key=lambda triple: triple[2], reverse=True)
         if k <= 0:
             return []
         if query_embedding is None:
-            return [m for m, _ in scored[:k]]
-        embedded_count = sum(1 for m, _ in scored if m.embedding is not None)
+            return [(m, comps) for m, comps, _ in scored[:k]]
+        embedded_count = sum(1 for m, _, _ in scored if m.embedding is not None)
         if embedded_count < 2:
-            return [m for m, _ in scored[:k]]
-        return self._mmr_select(scored, k)
+            return [(m, comps) for m, comps, _ in scored[:k]]
+        picked = self._mmr_select([(m, s) for m, _, s in scored], k)
+        comps_by_id = {id(m): comps for m, comps, _ in scored}
+        return [(m, comps_by_id[id(m)]) for m in picked]
 
     def _mmr_select(self, scored: list[tuple["Memory", float]], k: int) -> list["Memory"]:
         """贪心 MMR：每一步都从剩下的候选里，挑"自身分数高、又跟已经选中的都不太像"的那条。

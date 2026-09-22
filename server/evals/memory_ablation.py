@@ -1,11 +1,20 @@
-"""记忆检索的消融实验：只用新近度 / 新近度+重要度 / 三项全开（含语义相关度）——同一批
-记忆、同一个查询，三种打分配置分别选出的 top-1 差多少。
+"""记忆检索的消融实验：只用新近度 / 新近度+重要度 / 三项直接相加 / recall() 实际排序
+（三项相加 + 跨候选归一化）——同一批记忆、同一个查询，几种配置分别选出的 top-1 差多少。
 
 MemoryStore.score() 是新近度+重要度+相关度三项加权求和，component_scores() 能把三项拆
 开看（task 17 加的），这个脚本就是拿这个拆分做消融：每个场景放一条"很久以前的事、重要度
 也不高，但内容真的对题"的目标记忆，配两条"很新、重要度也不低，但内容跟问题毫不相关"的
 干扰记忆——只看新近度、或者只看新近度+重要度，这两种朴素配置都会被"新且重要"的干扰项
-骗到，只有把相关度也算进去，目标记忆才能翻身排到第一。
+骗到。
+
+这个脚本本来只做到"三项直接相加"这一档就打算收工，offline 假向量下这一档已经是 5/5——
+但用真实 embedding 一跑，这一档反而是 0/5！根本原因：offline 用的关键词词袋向量，相关度
+不是 0 就是 1，天然跟新近度/重要度同一个量级；真实 embedding 对同一种口吻的短句算出来的
+余弦相似度，哪怕内容完全不沾边也有个不低的基线，"最相关"和"完全不相关"之间能拉开的分差
+往往只有 0.1~0.5 这么窄，直接相加时新近度+重要度（能到 0~1 满量程）系统性地压过了相关度。
+为了解决这个，MemoryStore._ranking_components() 加了一步跨候选的 min-max 归一化（只对
+"真的算出语义相关度"的候选生效），这里第四档"recall() 实际排序"就是验证这一步归一化真的
+把问题解了——不是自己又搭了一套简化逻辑，走的是 recall() 本身的代码路径。
 
 跟 evals/memory_recall.py 不是一回事：那边比的是"相关度这一项，用旧公式（认不认人）还是
 新公式（语义相似度）"，这里比的是"相关度这一项到底值不值得加进总分、加了之后跟只看
@@ -104,8 +113,9 @@ DISTRACTOR_AGES = (200.0, 350.0)
 CONFIGS = {
     "仅新近度": (1, 0, 0),
     "新近度+重要度": (1, 1, 0),
-    "三项全开（含语义相关度）": (1, 1, 1),
+    "三项直接相加（不归一化）": (1, 1, 1),
 }
+RECALL_LABEL = "recall() 实际排序（三项相加 + 跨候选归一化）"
 
 
 class OfflineEmbedder:
@@ -141,6 +151,10 @@ async def eval_scenario(scenario: dict, embedder) -> dict:
         )
         top1 = ranked[0].text
         result[label] = {"top1_pick": top1, "correct": top1 == scenario["target"]}
+
+    # 第四档：不自己手算加权，直接走 recall() 本身（含 _ranking_components() 的归一化）
+    top1 = store.recall(frozenset(), NOW, k=1, query_embedding=query_vec)[0].text
+    result[RECALL_LABEL] = {"top1_pick": top1, "correct": top1 == scenario["target"]}
     return result
 
 
@@ -203,9 +217,10 @@ async def run(embedder_kind: str) -> tuple[dict, list[dict], dict]:
             raise SystemExit("没有可用的 embedding 客户端：请检查 server/.env 里是否配置了 OPENAI_API_KEY。")
     rows = [await eval_scenario(s, embedder) for s in SCENARIOS]
     n = len(rows)
+    all_labels = [*CONFIGS, RECALL_LABEL]
     summary = {
         label: sum(1 for r in rows if r[label]["correct"]) / n
-        for label in CONFIGS
+        for label in all_labels
     }
     mmr = await eval_mmr_diversity(embedder)
     return summary, rows, mmr
@@ -222,7 +237,7 @@ def render_rows(rows: list[dict]) -> str:
     out = []
     for r in rows:
         out.append(f"话题：{r['topic']}　查询：「{r['query']}」　应该想起：「{r['correct']}」")
-        for label in CONFIGS:
+        for label in [*CONFIGS, RECALL_LABEL]:
             mark = "OK " if r[label]["correct"] else "BAD"
             out.append(f"  [{mark}] {label}：选了「{r[label]['top1_pick']}」")
     return "\n".join(out)
