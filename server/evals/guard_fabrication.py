@@ -130,11 +130,14 @@ def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None
     ok = [r for r in rows if r["expected"] == "ok"]
 
     def split(label_key):
-        """准确率拆成两半：编造抓住了多少（召回）、真话误伤了多少（误报）。样本一大，只报一个
-        准确率会把"什么都判 ok"和"什么都判编造"混在一起。"""
+        """准确率拆成三个数：编造抓住了多少（标签正好是 fabricated）、编造拦下了多少（任何非 ok 标签——
+        判成 out_of_character / unsafe 标签是错的，但系统里照样退回兜底，玩家看不到那句话）、真话误伤了
+        多少。样本一大，只报一个准确率会把"什么都判 ok"和"什么都判编造"混在一起；抓住率和拦下率的差
+        就是"拦对了但标签错"的那部分。"""
         caught = sum(1 for r in fab if r[label_key] == "fabricated") / len(fab) if fab else None
+        blocked = sum(1 for r in fab if r[label_key] not in (None, "ok")) / len(fab) if fab else None
         hurt = sum(1 for r in ok if r[label_key] not in (None, "ok")) / len(ok) if ok else None
-        return caught, hurt
+        return caught, hurt, blocked
 
     summary = {
         "guard_available": guard_ready,
@@ -154,9 +157,9 @@ def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None
         },
         "split": {
             "regex": split("regex_label"),
-            "guard": split("guard_label") if guard_ready else (None, None),
-            "nli": split("nli_alone_label") if grounding_ready else (None, None),
-            "combined": split("combined_label") if (guard_ready and grounding_ready) else (None, None),
+            "guard": split("guard_label") if guard_ready else (None, None, None),
+            "nli": split("nli_alone_label") if grounding_ready else (None, None, None),
+            "combined": split("combined_label") if (guard_ready and grounding_ready) else (None, None, None),
         },
     }
     return summary, rows
@@ -184,15 +187,15 @@ def render_table(summary: dict) -> str:
         )
     sp = summary["split"]
     lines = [
-        f"| 方法 | 准确率（{summary['n']} 条） | 编造抓住率（{summary['n_fabricated']} 条编造） | 真话误伤率（{summary['n_ok']} 条真话） |",
-        "|---|---|---|---|",
-        f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} | {_pct(sp['regex'][0])} | {_pct(sp['regex'][1])} |",
-        f"| guard 分类器（LoRA，{summary['adapter']}） | {summary['guard_accuracy']:.0%} | {_pct(sp['guard'][0])} | {_pct(sp['guard'][1])} |",
+        f"| 方法 | 准确率（{summary['n']} 条） | 编造抓住率（{summary['n_fabricated']} 条编造） | 编造拦下率（含判成其它标签） | 真话误伤率（{summary['n_ok']} 条真话） |",
+        "|---|---|---|---|---|",
+        f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} | {_pct(sp['regex'][0])} | {_pct(sp['regex'][2])} | {_pct(sp['regex'][1])} |",
+        f"| guard 分类器（LoRA，{summary['adapter']}） | {summary['guard_accuracy']:.0%} | {_pct(sp['guard'][0])} | {_pct(sp['guard'][2])} | {_pct(sp['guard'][1])} |",
     ]
     if summary["grounding_available"]:
         lines += [
-            f"| 带依据的 NLI 单独把关（蕴含 >= {VETO_THRESHOLD} 才算 ok） | {summary['nli_alone_accuracy']:.0%} | {_pct(sp['nli'][0])} | {_pct(sp['nli'][1])} |",
-            f"| guard + 证据否决（系统里实际的组合） | {summary['combined_accuracy']:.0%} | {_pct(sp['combined'][0])} | {_pct(sp['combined'][1])} |",
+            f"| 带依据的 NLI 单独把关（蕴含 >= {VETO_THRESHOLD} 才算 ok） | {summary['nli_alone_accuracy']:.0%} | {_pct(sp['nli'][0])} | {_pct(sp['nli'][2])} | {_pct(sp['nli'][1])} |",
+            f"| guard + 证据否决（系统里实际的组合） | {summary['combined_accuracy']:.0%} | {_pct(sp['combined'][0])} | {_pct(sp['combined'][2])} | {_pct(sp['combined'][1])} |",
         ]
     else:
         lines.append("| 带依据的 NLI 核查 | 不可用（模型没下到，或没装 sentencepiece） |")
