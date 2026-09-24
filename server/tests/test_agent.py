@@ -1,6 +1,6 @@
 import asyncio
 
-from townmind import world
+from townmind import safety, world
 from townmind.agent import (
     CONVERSATION_IDLE_SECONDS,
     IMPORTANCE_HEARD,
@@ -2029,3 +2029,52 @@ def test_assertive_threshold_covers_the_first_two_hops_of_a_whisper():
 
     first, second = retold_importance(9), retold_importance(retold_importance(9))
     assert first >= SHARE_ASSERTIVE_IMPORTANCE > second
+
+
+# ---------- 带依据的核查：证据否决 guard ----------
+class _FakeGuard:
+    def __init__(self, label): self.label = label
+    def classify(self, npc_id, text): return self.label
+
+
+class _FakeGrounding:
+    def __init__(self, score): self.score = score; self.calls = []
+    def supported(self, npc_id, statement, memories=()):
+        self.calls.append((npc_id, statement, tuple(memories))); return self.score
+
+
+def test_evidence_overrules_guard_when_statement_is_supported():
+    import asyncio
+    from townmind.grounding import VETO_THRESHOLD
+
+    a = Agent(None, guard_model=_FakeGuard("fabricated"), grounding=_FakeGrounding(VETO_THRESHOLD + 0.1))
+    res = asyncio.run(a._consult_guard_model("alice", "镇长每个月都会来广场巡视", safety.GuardResult(True, "x", [])))
+    assert res.ok, "依据支持这句话，guard 的误判该被推翻"
+    assert a.stats["guard_overruled_by_evidence"] == 1
+
+
+def test_evidence_does_not_rescue_unsupported_statement():
+    import asyncio
+    from townmind.grounding import VETO_THRESHOLD
+
+    a = Agent(None, guard_model=_FakeGuard("fabricated"), grounding=_FakeGrounding(VETO_THRESHOLD - 0.1))
+    res = asyncio.run(a._consult_guard_model("alice", "国王要收我做徒弟", safety.GuardResult(True, "x", [])))
+    assert not res.ok and "guard_model_fabricated" in res.flags
+    assert a.stats.get("guard_overruled_by_evidence", 0) == 0
+
+
+def test_evidence_check_only_runs_when_guard_says_fabricated():
+    import asyncio
+
+    g = _FakeGrounding(0.99)
+    a = Agent(None, guard_model=_FakeGuard("out_of_character"), grounding=g)
+    res = asyncio.run(a._consult_guard_model("alice", "作为一个AI…", safety.GuardResult(True, "x", [])))
+    assert not res.ok and g.calls == [], "只有\"编造\"才需要证据否决，语气问题依据救不了"
+
+
+def test_grounding_unavailable_keeps_guard_verdict():
+    import asyncio
+
+    a = Agent(None, guard_model=_FakeGuard("fabricated"), grounding=_FakeGrounding(None))
+    res = asyncio.run(a._consult_guard_model("alice", "国王要收我做徒弟", safety.GuardResult(True, "x", [])))
+    assert not res.ok, "grounding 不可用时不能推翻 guard——宁可信 guard 也不能放过编造"
