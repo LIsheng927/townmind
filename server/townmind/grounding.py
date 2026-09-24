@@ -15,9 +15,14 @@
 这个项目里的角色是**证据否决**：只在 guard 说"编造"的时候出面，如果依据明明能推出这句话，
 就推翻 guard 的判断。这样只用到 NLI 最擅长的一半——"有依据"这个方向的高精度。
 
-MiniCheck 系列模型只有英文；这里用的是同一思路的多语言 NLI 模型（XNLI 覆盖中文）：
-MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7，约 2.8 亿参数，GPU 上
-一批二三十条依据一次前向几十毫秒。
+MiniCheck 系列模型只有英文；这里用的是同一思路的多语言 NLI 模型（XNLI 覆盖中文）。
+模型和喂法都是 evals/grounding_probe.py 拿 9 条"换了说法的真话"选出来的：
+  - 依据要逐条作 premise、取最高分，不能拼成一段（拼成一段 0/9，相关的那句被淹没）；
+  - 模型要大一号：mDeBERTa-v3-base（2.8 亿）认出 4/9，XLM-R large（5.6 亿）认出 6/9，
+    编造都是 0 漏过。剩下认不出的是寒暄和带小尾巴的句子（"……，镇上人都知道"），
+    那是 NLI"整句必须被推出"这个定义的边界，换更大的模型也不会变。
+XLM-R large 约 2.2GB，GPU 上一批二三十条依据一次前向几十毫秒；想省显存可以用
+TOWNMIND_GROUNDING_MODEL 换回 base。
 
 跟 guard_model.py 一样是彻底可选的：没装 torch/transformers、没下到模型、推理异常，
 都当作"这一层不可用"，返回 None，绝不拖垮主流程。推理是同步阻塞的，调用方要
@@ -33,7 +38,7 @@ log = logging.getLogger("townmind.grounding")
 
 ENV_ENABLE = "TOWNMIND_USE_GROUNDING"
 ENV_MODEL = "TOWNMIND_GROUNDING_MODEL"
-DEFAULT_MODEL = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+DEFAULT_MODEL = "joeddav/xlm-roberta-large-xnli"
 # 蕴含概率到这个数以上，才算"依据确实支持这句话"、有资格推翻 guard。定得偏高是有意的：
 # 这一层只负责救回被误判的真话，宁可少救也不能把真编造放过去
 VETO_THRESHOLD = 0.7

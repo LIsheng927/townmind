@@ -26,6 +26,7 @@ guard-model = [
     "transformers>=4.44",
     "peft>=0.12",
     "sentencepiece>=0.2",  # townmind/grounding.py 用的 mDeBERTa 分词器需要
+    "protobuf>=4",  # 慢分词器转快分词器时需要（XLM-R 一类的 sentencepiece 模型）
 ]
 
 [tool.pytest.ini_options]
