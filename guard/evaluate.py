@@ -3,7 +3,7 @@
 用法（在 guard 目录下）：
 
     uv run --group train python evaluate.py                        # 默认跑 test_indomain + test_crossdomain
-    uv run --group train python evaluate.py --run-name guard-v1     # 指定用哪个 adapter
+    uv run --group train python evaluate.py --run-name guard-v1     # 指定用哪个 adapter（默认 guard-v2）
 
 会分别打印两个测试集上、两种方法各自的总体准确率，以及每个类别（ok/fabricated/
 out_of_character/unsafe）单独的命中率——这比只看一个笼统的总分更有用，能直接看出
@@ -107,7 +107,7 @@ def summarize(rows: list[dict], preds: list[str], name: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--run-name", default="guard-v1")
+    ap.add_argument("--run-name", default="guard-v2")
     ap.add_argument("--sets", nargs="+", default=["test_indomain", "test_crossdomain"])
     args = ap.parse_args()
 

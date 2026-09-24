@@ -1,0 +1,784 @@
+{
+  "kind": "guard",
+  "reviewed": true,
+  "items": [
+    {
+      "npc_id": "alice",
+      "reply": "面包师公会又提倡用优质面粉了，咱得仔细选料才行。",
+      "note": "面包师公会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "铁匠联盟的新规矩真麻烦，不过也得照做。",
+      "note": "铁匠联盟",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "旅行商会让我收集点稀奇物件，下次该往哪儿呢？",
+      "note": "旅行商会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "酒馆协会说今年酒要酿得更加多样化，是个新挑战。",
+      "note": "酒馆协会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "磨坊公会对面粉价格又有新意见了，我得看看。",
+      "note": "磨坊公会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "糕点师协会每年都评选最佳饼干，我想参加。",
+      "note": "提到协会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "铁矿商会的会议我下月得去，可能要定新价格。",
+      "note": "提到商会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "旅行者联盟建议我们多了解各地婚俗，真是有趣。",
+      "note": "提到联盟",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "饮品协会举办的品酒会我必定参加，希望学些新花样。",
+      "note": "提到协会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "农作物委员会说今年的麦子品种得注意搭配，影响大。",
+      "note": "提到委员会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "糕点艺术学会的新课程挺不错，我准备试试。",
+      "note": "提到糕点艺术学会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "战士工会的刀剑质量标准更新了，得严格遵守。",
+      "note": "提到战士工会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "各地商旅公会的集市安排最近调整了，得提前规划路线。",
+      "note": "提到商旅公会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "旅店联合会说住宿环境要改进，我们也得提升下。",
+      "note": "提到旅店联合会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "农资协会的肥料推荐挺管用，明年继续用。",
+      "note": "提到农资协会",
+      "expected": "fabricated",
+      "kind": "编造的机构/组织（学院、商会、王宫……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "国王大人最爱烤法棍，他常命人捎来好几袋面包。",
+      "note": "国王爱法棍",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "魔法师需要我打的刀具，今天晚上必须赶工。",
+      "note": "魔法师急敲刀",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "邻镇的裁缝大师艾琳娜，她的绣品真是一绝啊。",
+      "note": "夸裁缝绣品",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "最近，邻镇的猎户艾德总来酒馆喝酒，都是关猎物的事。",
+      "note": "邻镇猎户",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "我姐姐在邻镇的花匠那儿工作，真想去看看那些玫瑰。",
+      "note": "邻镇花匠",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "镇西的法师要一把魔杖，我们可得好好挑木料。",
+      "note": "魔杖订单",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "沙漠旅行者卡尔文说他的骆驼挺怕水，你信吗？",
+      "note": "沙漠旅行者",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "邻镇的医生总托我捎药材，他家的草药特别好。",
+      "note": "邻镇医生",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "王后的御厨常来磨坊取面粉，就为那松饼的香味。",
+      "note": "王后御厨",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "邻镇的泥瓦匠老乔治，今年要来这里修房顶。",
+      "note": "邻镇泥瓦匠",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "森林里的隐士来买蜡烛，他最怕黑夜笼罩森林。",
+      "note": "隐士",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "海盗长约翰想让我打把剑，要去远航。",
+      "note": "海盗长",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "邻镇的校长很爱吃我们的蓝莓松饼，每个月都来一次。",
+      "note": "邻镇校长",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "老黑森林的猎人总要我给他锻造箭头，需求还不小。",
+      "note": "编造人物",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "伊芙是东边大城的舞蹈家，每次她的演出都满座。",
+      "note": "东边大城的舞蹈家",
+      "expected": "fabricated",
+      "kind": "编造的人物（国王、法师、邻镇的谁……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "前些日子我在邻镇参加了一个盛大的集市，见到了很多稀奇古怪的东西。",
+      "note": "参加邻镇集市",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "前不久一个邻镇商人停下来跟我喝酒，聊了好多有趣的异国见闻。",
+      "note": "商人聊异国见闻",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "上周我被邀请去邻镇的一个晚宴，菜做得还不错呢。",
+      "note": "被邀去晚宴",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "最近有人从远洋带回来一种奇特的香料，我买了点，味道很特别。",
+      "note": "买奇特香料",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "有人告诉我，邻镇找到了一本记录当地历史的古书，我还特地去看了。",
+      "note": "邻镇出现古书",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "去邻镇路上，我遇到一个游吟诗人，竟然给我唱了一首专属于我的歌。",
+      "note": "遇见游吟诗人",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "我最近出发去一个沿海城市，尝到了那儿特别的海鲜大餐，真是美味极了！",
+      "note": "出远门尝海鲜",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "我最近被邀参加了一场面包大赛，还拿了个小奖，挺开心的。",
+      "note": "参赛获奖",
+      "expected": "fabricated",
+      "kind": "编造的事件/经历（挖到宝、被邀请、出远门……）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "今天试着用紫玉米粉做了新口味的松饼，味道还不错！",
+      "note": "新品松饼",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "给小镇的护井盖又换上了钛钢打造的新样式，应该更结实了。",
+      "note": "护井盖",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "最近旅途中发现了一种叫流星砂的矿石，非常适合做幸运挂件。",
+      "note": "流星砂",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "我们店供应的新啤酒是用金麦芽酿的，香味更醇。",
+      "note": "金麦芽啤酒",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "今年大麦收成不佳，我准备引进一种耐寒的大麦品种。",
+      "note": "耐寒大麦",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "店里新进的绯红盐，据说更有助于保存食物。",
+      "note": "绯红盐",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "我正在学习怎么用火山石打锤子，这种石头据说打出来的锤子最耐用。",
+      "note": "火山石锤子",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "有个糕点加了蜜蔷果的馅料，香甜得让人停不下来。",
+      "note": "蜜蔷果",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "为了夜班更有精神，我最近喝一种叫夜光茶的新茶，提神效果很好。",
+      "note": "夜光茶",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "我带了一些邻镇的晴雨伞来，有自动收放的机关，大家快看看！",
+      "note": "晴雨伞",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "今早的肉桂卷加了点香橙粉，味道特别丰富。",
+      "note": "编造物品香橙粉",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "今天试了种新果酱叫晨露浆果酱，很受欢迎！",
+      "note": "编造食物",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "今天试着用月影粉做了蓝莓松饼，成品外观太漂亮了！",
+      "note": "新食材",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "打铁时用了一块银杏木锻造成的锤柄，用起来手感特别好。",
+      "note": "锤柄新材",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "酒馆新推出的季节限定炖肉，里面有一种叫冬霜菌的蘑菇，特别鲜美！",
+      "note": "炖肉",
+      "expected": "fabricated",
+      "kind": "编造的物品/食物（设定里没有的东西）"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "每天早上面包刚出炉，这地方就热闹非凡哦，法棍一下子都卖光啦！",
+      "note": "面包店早上热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "再等几天，新的铁矿就要送过来了，到时候可是要忙活一阵了。",
+      "note": "铁矿要送到",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "哎呀，听说这里最早就一个铁匠铺，现在嘛，不少地方都有店呢。",
+      "note": "小镇变热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "晚上来酒馆坐坐，喝两杯，保准你能听到镇上的各种大小事。",
+      "note": "酒馆消息灵通",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "唉，这磨坊今年麦子没收好，面粉也就涨了价嘞。",
+      "note": "面粉涨价",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "要买啥小东西？我这儿种类多着呢，不过数量不多，得赶紧哦。",
+      "note": "杂货铺备货有限",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "这古井啊，真有意思，都多少年没干过了，挺神奇的！",
+      "note": "古井没干过",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "瞧我这手艺，哎，其实新出炉的蓝莓松饼也是香喷喷呢。",
+      "note": "蓝莓松饼",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "镇上这地界挺安全，偷盗啥的基本没发生过，我就是来定时看看。",
+      "note": "治安良好",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "小镇没医馆呢，要看病还得去邻镇，挺不方便。",
+      "note": "没医馆",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "最近面粉价格涨了，真是让我忧心，不过该做的面包还是得做。",
+      "note": "面粉涨价",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "今早出炉的肉桂卷，你闻到那香味了吗？",
+      "note": "面包店早上热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "活儿得攒着点儿干，矿石快到了。",
+      "note": "铁矿要送到了",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "新地方真不错，人不多但地方有意思。",
+      "note": "小镇不大",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "小镇就这些地方，面包店、铁匠铺、磨坊、酒馆、杂货铺还有广场，一点都不复杂。",
+      "note": "小镇地方不多",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "脾气急归急，活儿还是得做完，东西坏了我可不忍着。",
+      "note": "工作态度",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "我可爱走动，广场上没事总是去转悠，指不定听到啥新鲜事儿。",
+      "note": "爱打听",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "傍晚来这儿准没错，店里这时候客人最多，气氛热闹得很。",
+      "note": "酒馆热闹时段",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "去年水轮修过一回，不过转起来还是有点响动呢。",
+      "note": "水轮去年修过",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "镇里啥都有点，买不到的就托Milo捎回来。",
+      "note": "Milo帮忙进货",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "镇上除了这些店，还住着Alice、Bob、Elsa、Dan、Finn、Jonas、Carol和Milo呢。",
+      "note": "镇上住户",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "有时话说不清，但换句话，Alice那儿的面包总是热烘烘的。",
+      "note": "话不多但话里有信息",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "每个月镇长例行巡视，这治安的事儿啥都逃不过他。",
+      "note": "镇长巡查",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "说起来，肉桂卷出炉那会儿，香气能传一条街，特别受欢迎呀！",
+      "note": "面包店早上热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "喂，这镇子上十来个人，个个都有自己的摊子和活儿！",
+      "note": "镇上住着十来口人",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "嘿，我问过Bob，他说其实镇上的治安特好，几乎没出过偷盗案。",
+      "note": "小镇治安很好",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "这地方，哪个地方有啥事，我这双眼睛可都看着呢。",
+      "note": "守夜人上心秩序",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "Milo来镇上的时候，大家都托他从邻镇带点儿货呢，方便着呢！",
+      "note": "托Milo从邻镇捎东西",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "呀，这水井居然都三十年没干过？真够神奇的！",
+      "note": "古井三十年没干过",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "我这儿法棍一出炉就没影了，早上可真忙得不可开交。",
+      "note": "面包店早上最热闹。",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "真希望矿石快点到，这铁的库存不多了，我可等不起。",
+      "note": "铁矿存货不多。",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "我这人就抱怨两句行情，磨面的活还是要干的嘛。",
+      "note": "爱抱怨行情，活还是照干。",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "我这小店啥针头线脑都有，不过你来晚可就没货啦！",
+      "note": "杂货铺什么都卖一点。",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "小镇真的不大，来来去去就这么几个地方哦。",
+      "note": "小镇不大。",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "到酒馆来坐坐，镇上的新闻八卦，我这儿应有尽有。",
+      "note": "酒馆最灵通",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "嘿，广场的集市可不能错过，周六大家都来赶集呢！",
+      "note": "周六有集市",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "收成不太好，这面粉价也跟着往上翻，让我头疼呢。",
+      "note": "面粉供应问题",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "正等新的矿石送来呢，现在铁矿不多，急坏我了。",
+      "note": "铁矿不足",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "milo",
+      "reply": "我这担子挑的辛苦，走街串巷把消息带给每个人。",
+      "note": "勤跑消息灵通",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "Alice做的法棍，总是刚出炉就一抢而空呢！",
+      "note": "法棍畅销",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "瞧这治安真不错，镇上几乎没啥偷盗案。",
+      "note": "镇治安好",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "这镇子建立有五十年了，从铁匠铺开始呢，后来才热闹起来。",
+      "note": "小镇建立历史",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "卖得快的东西，卖完就只能等下次补货啦。",
+      "note": "库存有限",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "早上的时候店里最忙，法棍总是一出炉就被抢光！",
+      "note": "早上最热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "最近面粉涨了价，惹得我这心烦意乱的，得想办法应对才是。",
+      "note": "面粉涨价",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "bob",
+      "reply": "铁矿快见底了，新矿石还不送来，真恼人。",
+      "note": "矿石存量不足",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "白天来我这儿，基本是清净得很，没人影呢。",
+      "note": "酒馆白天安静",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "听说镇上到现在都没个医馆，看病还得跑邻镇去呢。",
+      "note": "无医馆需去邻镇",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "elsa",
+      "reply": "磨坊的面粉全是供给小镇上的那家面包店呢。",
+      "note": "磨坊供面包店",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "finn",
+      "reply": "镇上人都挺信我小店，托我帮他们搞点不常见的东西来卖。",
+      "note": "杂货铺货品多",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "我们这铁匠铺，这不就是镇上最老的地方吗？",
+      "note": "铁匠铺最早建立",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "iris",
+      "reply": "觉不觉得，我在这儿工作的时候，面包香气简直扑鼻啊。",
+      "note": "面包店香味",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "jonas",
+      "reply": "我挺为这个小镇的秩序骄傲的，常年没啥偷盗案子。",
+      "note": "治安好",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "carol",
+      "reply": "这儿我是新来的，镇上的事还要慢慢摸清。",
+      "note": "商人初来小镇",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "早上面包店香气都飘满街，大家都赶来抢法棍，那场面真热闹！",
+      "note": "面包店早上热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "alice",
+      "reply": "磨坊的面粉全是给我店里用的，咱小镇就靠它供面粉。",
+      "note": "面粉供应",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "greta",
+      "reply": "你知道吗？咱们这儿以前只有铁匠铺一家店，慢慢才成现在这样热闹的。",
+      "note": "最早只有铁匠铺",
+      "expected": "ok",
+      "kind": "真话换说法"
+    },
+    {
+      "npc_id": "dan",
+      "reply": "晚上来我这儿，酒馆可热闹得很，人都扎堆儿来！",
+      "note": "酒馆晚上热闹",
+      "expected": "ok",
+      "kind": "真话换说法"
+    }
+  ],
+  "review_note": "生成 120 条：4 条格式嵌套（拆出 3 条可用）；删 12 条——8 条「编造经历」其实是无害琐事（猫掉井里、看到流星），编造指凭空造出设定外的机构/人物/地点/物品/承诺，不是说了件设定没写的小事；1 条以「有人说」开头属于传闻；2 条真话把 Carol 的「刚来小镇」按到了 Bob/Milo 头上。留 111。"
+}

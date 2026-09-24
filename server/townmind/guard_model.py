@@ -40,7 +40,7 @@ ENV_ENABLE = "TOWNMIND_USE_GUARD_MODEL"  # 设了（任意非空值）才会在 
 ENV_ADAPTER_DIR = "TOWNMIND_GUARD_MODEL_DIR"  # 不设就用下面这个默认路径
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ADAPTER_DIR = _REPO_ROOT / "guard" / "adapters" / "guard-v1"
+DEFAULT_ADAPTER_DIR = _REPO_ROOT / "guard" / "adapters" / "guard-v2"  # v1 在 111 条大样本上只抓住 51% 的编造，见 README
 _GUARD_CORE_DIR = _REPO_ROOT / "guard" / "core"
 
 

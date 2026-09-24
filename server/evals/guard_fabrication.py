@@ -22,8 +22,15 @@ adapter）时不会硬跑，会清楚提示装什么依赖，只打印正则那�
 
 用法（在 server 目录下）：
   uv sync --group guard-model              # 先装可选依赖（torch 几百 MB 到几 GB）
-  uv run python -m evals.guard_fabrication
+  uv run python -m evals.guard_fabrication                       # 内置 16 条手写样本
+  uv run python -m evals.guard_fabrication --scenarios evals/scenarios/guard.json   # 111 条生成+人工过的场景库
+  uv run python -m evals.guard_fabrication --scenarios ... --adapter ../guard/adapters/guard-v1   # 换 adapter 对比
+
+补一句后记：16 条手写样本上 guard-v1 有 88%，111 条干净样本上编造抓住率只有 51%——手写样本
+惯出来的数字。按盲区补数据重训的 guard-v2 抓住 92%，现在是默认 adapter；细节见 README
+"大样本回测"一节。
 """
+import argparse
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -78,13 +85,23 @@ def regex_predict(reply: str) -> str:
     return "ok"
 
 
-def run() -> tuple[dict, list[dict]]:
-    guard = GuardModel()
+def load_scenarios(path: Path) -> list[Scenario]:
+    """从 evals/gen_scenarios.py 生成、人工过过的场景库里读。reviewed=false 的只警告不拒绝——
+    跑通流程可以，下结论不行。"""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not data.get("reviewed"):
+        print(f"警告：{path.name} 标着 reviewed=false，没人看过的题只能跑流程，不能拿来下结论。")
+    return [Scenario(x["npc_id"], x["reply"], x["expected"], x.get("note", x.get("kind", ""))) for x in data["items"]]
+
+
+def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None) -> tuple[dict, list[dict]]:
+    scenarios = scenarios or SCENARIOS
+    guard = GuardModel(adapter_dir)
     guard_ready = guard.available
     grounding = GroundingChecker()
     grounding_ready = grounding.available
     rows = []
-    for s in SCENARIOS:
+    for s in scenarios:
         regex_label = regex_predict(s.reply)
         guard_label = guard.classify(s.npc_id, s.reply) if guard_ready else None
         score = grounding.supported(s.npc_id, s.reply) if grounding_ready else None
@@ -107,6 +124,16 @@ def run() -> tuple[dict, list[dict]]:
         })
     n = len(rows)
     acc = lambda key: (sum(bool(r[key]) for r in rows) / n)
+    fab = [r for r in rows if r["expected"] == "fabricated"]
+    ok = [r for r in rows if r["expected"] == "ok"]
+
+    def split(label_key):
+        """准确率拆成两半：编造抓住了多少（召回）、真话误伤了多少（误报）。样本一大，只报一个
+        准确率会把"什么都判 ok"和"什么都判编造"混在一起。"""
+        caught = sum(1 for r in fab if r[label_key] == "fabricated") / len(fab) if fab else None
+        hurt = sum(1 for r in ok if r[label_key] not in (None, "ok")) / len(ok) if ok else None
+        return caught, hurt
+
     summary = {
         "guard_available": guard_ready,
         "grounding_available": grounding_ready,
@@ -114,9 +141,20 @@ def run() -> tuple[dict, list[dict]]:
         "guard_accuracy": acc("guard_correct") if guard_ready else None,
         "nli_alone_accuracy": acc("nli_alone_correct") if grounding_ready else None,
         "combined_accuracy": acc("combined_correct") if (guard_ready and grounding_ready) else None,
-        "n": n,
+        "n": n, "n_fabricated": len(fab), "n_ok": len(ok),
+        "adapter": guard.adapter_dir.name if guard_ready else None,
+        "split": {
+            "regex": split("regex_label"),
+            "guard": split("guard_label") if guard_ready else (None, None),
+            "nli": split("nli_alone_label") if grounding_ready else (None, None),
+            "combined": split("combined_label") if (guard_ready and grounding_ready) else (None, None),
+        },
     }
     return summary, rows
+
+
+def _pct(v) -> str:
+    return "-" if v is None else f"{v:.0%}"
 
 
 def render_table(summary: dict) -> str:
@@ -127,16 +165,17 @@ def render_table(summary: dict) -> str:
             f"| 方法 | 准确率（{summary['n']} 条） |\n|---|---|\n"
             f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} |"
         )
+    sp = summary["split"]
     lines = [
-        f"| 方法 | 准确率（{summary['n']} 条） |",
-        "|---|---|",
-        f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} |",
-        f"| guard 分类器（LoRA，guard-v1） | {summary['guard_accuracy']:.0%} |",
+        f"| 方法 | 准确率（{summary['n']} 条） | 编造抓住率（{summary['n_fabricated']} 条编造） | 真话误伤率（{summary['n_ok']} 条真话） |",
+        "|---|---|---|---|",
+        f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} | {_pct(sp['regex'][0])} | {_pct(sp['regex'][1])} |",
+        f"| guard 分类器（LoRA，{summary['adapter']}） | {summary['guard_accuracy']:.0%} | {_pct(sp['guard'][0])} | {_pct(sp['guard'][1])} |",
     ]
     if summary["grounding_available"]:
         lines += [
-            f"| 带依据的 NLI 单独把关（蕴含 >= {VETO_THRESHOLD} 才算 ok） | {summary['nli_alone_accuracy']:.0%} |",
-            f"| guard + 证据否决（系统里实际的组合） | {summary['combined_accuracy']:.0%} |",
+            f"| 带依据的 NLI 单独把关（蕴含 >= {VETO_THRESHOLD} 才算 ok） | {summary['nli_alone_accuracy']:.0%} | {_pct(sp['nli'][0])} | {_pct(sp['nli'][1])} |",
+            f"| guard + 证据否决（系统里实际的组合） | {summary['combined_accuracy']:.0%} | {_pct(sp['combined'][0])} | {_pct(sp['combined'][1])} |",
         ]
     else:
         lines.append("| 带依据的 NLI 核查 | 不可用（模型没下到，或没装 sentencepiece） |")
@@ -160,7 +199,11 @@ def render_rows(rows: list[dict]) -> str:
 
 
 def main() -> None:
-    summary, rows = run()
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--scenarios", type=Path, default=None, help="场景库 JSON（evals/gen_scenarios.py guard 生成）；不传用内置 16 条")
+    ap.add_argument("--adapter", type=Path, default=None, help="换一个 LoRA adapter 目录（比如 ../guard/adapters/guard-v2）；不传用 guard_model.DEFAULT_ADAPTER_DIR")
+    args = ap.parse_args()
+    summary, rows = run(load_scenarios(args.scenarios) if args.scenarios else None, adapter_dir=args.adapter)
     table = render_table(summary)
     print(f"\n{table}\n\n{render_rows(rows)}")
     RESULTS_DIR.mkdir(exist_ok=True)
