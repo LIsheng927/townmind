@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from townmind import safety
+from townmind.grounding import VETO_THRESHOLD, GroundingChecker
 from townmind.guard_model import GuardModel
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -58,6 +59,12 @@ SCENARIOS = [
     Scenario("bob", "小镇治安一向很好，很少出什么偷盗案件。", "ok", "真实设定"),
     Scenario("carol", "我刚到这小镇不久，还不太熟悉这里。", "ok", "真实设定（Carol 自己的背景）"),
     Scenario("alice", "今天天气不错，要不要尝尝我刚出炉的法棍？", "ok", "日常寒暄+真实物品"),
+    # ---- 真话、但措辞跟设定原文不一样：专测"guard 误判真事"，也是带依据核查要救回来的那类 ----
+    Scenario("dan", "广场那口老井三十年没干过，镇上人都知道。", "ok", "真实设定，换了说法"),
+    Scenario("elsa", "今年麦子收成一般，面粉才涨的价，我也没办法。", "ok", "真实设定，第一人称改写"),
+    Scenario("finn", "镇上买不到的东西，托 Milo 从邻镇带就行。", "ok", "真实设定，换了说法"),
+    Scenario("greta", "这镇子建了快五十年了，最早就铁匠铺一家。", "ok", "真实设定，口语化"),
+    Scenario("jonas", "上周六广场有集市，镇上的人差不多都来了。", "ok", "真实设定（广场地点设定）"),
 ]
 
 
@@ -74,20 +81,39 @@ def regex_predict(reply: str) -> str:
 def run() -> tuple[dict, list[dict]]:
     guard = GuardModel()
     guard_ready = guard.available
+    grounding = GroundingChecker()
+    grounding_ready = grounding.available
     rows = []
     for s in SCENARIOS:
         regex_label = regex_predict(s.reply)
         guard_label = guard.classify(s.npc_id, s.reply) if guard_ready else None
+        score = grounding.supported(s.npc_id, s.reply) if grounding_ready else None
+        # NLI 单独当出口检查会怎样：蕴含不过阈值就算编造。预期它会把寒暄误判——这正是
+        # 它在系统里只做"证据否决"、不单独把关的原因，数字要摆出来
+        nli_alone = (("ok" if score >= VETO_THRESHOLD else "fabricated") if score is not None else None)
+        # 系统里真正的组合：guard 判编造、但依据支持 -> 推翻；其余照 guard
+        if guard_label == "fabricated" and score is not None and score >= VETO_THRESHOLD:
+            combined = "ok"
+        else:
+            combined = guard_label
         rows.append({
             "npc_id": s.npc_id, "reply": s.reply, "expected": s.expected, "note": s.note,
             "regex_label": regex_label, "regex_correct": regex_label == s.expected,
             "guard_label": guard_label, "guard_correct": (guard_label == s.expected) if guard_ready else None,
+            "nli_score": None if score is None else round(score, 3),
+            "nli_alone_label": nli_alone, "nli_alone_correct": (nli_alone == s.expected) if nli_alone else None,
+            "combined_label": combined,
+            "combined_correct": (combined == s.expected) if (guard_ready and grounding_ready) else None,
         })
     n = len(rows)
+    acc = lambda key: (sum(bool(r[key]) for r in rows) / n)
     summary = {
         "guard_available": guard_ready,
-        "regex_accuracy": sum(r["regex_correct"] for r in rows) / n,
-        "guard_accuracy": (sum(r["guard_correct"] for r in rows) / n) if guard_ready else None,
+        "grounding_available": grounding_ready,
+        "regex_accuracy": acc("regex_correct"),
+        "guard_accuracy": acc("guard_correct") if guard_ready else None,
+        "nli_alone_accuracy": acc("nli_alone_correct") if grounding_ready else None,
+        "combined_accuracy": acc("combined_correct") if (guard_ready and grounding_ready) else None,
         "n": n,
     }
     return summary, rows
@@ -101,12 +127,20 @@ def render_table(summary: dict) -> str:
             f"| 方法 | 准确率（{summary['n']} 条） |\n|---|---|\n"
             f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} |"
         )
-    return "\n".join([
+    lines = [
         f"| 方法 | 准确率（{summary['n']} 条） |",
         "|---|---|",
         f"| 正则规则（safety.check_npc_reply） | {summary['regex_accuracy']:.0%} |",
         f"| guard 分类器（LoRA，guard-v1） | {summary['guard_accuracy']:.0%} |",
-    ])
+    ]
+    if summary["grounding_available"]:
+        lines += [
+            f"| 带依据的 NLI 单独把关（蕴含 >= {VETO_THRESHOLD} 才算 ok） | {summary['nli_alone_accuracy']:.0%} |",
+            f"| guard + 证据否决（系统里实际的组合） | {summary['combined_accuracy']:.0%} |",
+        ]
+    else:
+        lines.append("| 带依据的 NLI 核查 | 不可用（模型没下到，或没装 sentencepiece） |")
+    return "\n".join(lines)
 
 
 def render_rows(rows: list[dict]) -> str:
@@ -114,10 +148,13 @@ def render_rows(rows: list[dict]) -> str:
     for r in rows:
         regex_mark = "OK " if r["regex_correct"] else "BAD"
         guard_mark = "--- " if r["guard_correct"] is None else ("OK " if r["guard_correct"] else "BAD")
+        comb_mark = "--- " if r["combined_correct"] is None else ("OK " if r["combined_correct"] else "BAD")
+        nli = "-" if r["nli_score"] is None else f"{r['nli_score']:.2f}"
         out.append(
-            f"[regex:{regex_mark} guard:{guard_mark}] {r['npc_id']} 「{r['reply']}」\n"
+            f"[regex:{regex_mark} guard:{guard_mark} guard+证据:{comb_mark}] {r['npc_id']} 「{r['reply']}」\n"
             f"        期望：{r['expected']}　（{r['note']}）\n"
-            f"        正则判为：{r['regex_label']}　guard 判为：{r['guard_label']}"
+            f"        正则判为：{r['regex_label']}　guard 判为：{r['guard_label']}　"
+            f"蕴含：{nli}　组合判为：{r['combined_label']}"
         )
     return "\n".join(out)
 

@@ -25,6 +25,7 @@ guard-model = [
     "torch>=2.3",
     "transformers>=4.44",
     "peft>=0.12",
+    "sentencepiece>=0.2",  # townmind/grounding.py 用的 mDeBERTa 分词器需要
 ]
 
 [tool.pytest.ini_options]

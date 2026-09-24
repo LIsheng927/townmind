@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from . import world
 from .agent import Agent
+from .grounding import ENV_ENABLE as ENV_GROUNDING, GroundingChecker
 from .guard_model import ENV_ENABLE, GuardModel
 from .llm.embeddings import make_embedder
 from .llm.factory import make_client
@@ -35,6 +36,8 @@ DATA_DIR = Path(os.getenv("TOWNMIND_DATA_DIR") or Path(__file__).resolve().paren
 # 没装可选依赖（uv sync --group guard-model）、或者没有训练好的 adapter，都会在真正用到时
 # 优雅跳过，不影响服务启动，所以这里可以放心地无条件构造 GuardModel()。
 _guard_model = GuardModel() if os.getenv(ENV_ENABLE) else None
+# 带依据的核查只在 guard 判"编造"时出面，guard 没开它就永远用不上，所以两个都要设
+_grounding = GroundingChecker() if (_guard_model is not None and os.getenv(ENV_GROUNDING)) else None
 # 语义记忆检索的 embedding 客户端：同样是可选的，没配 OPENAI_API_KEY 时 make_embedder()
 # 返回 None，记忆的"相关度"评分自动退化成旧版的"认不认人"，不影响服务启动（见 llm/embeddings.py）。
 _embedder = make_embedder()
@@ -46,6 +49,7 @@ app.state.agent = Agent(
     _llm,
     memory_dir=DATA_DIR / "memories",
     guard_model=_guard_model,
+    grounding=_grounding,
     embedder=_embedder,
     dynamic_importance=_env_flag("TOWNMIND_DYNAMIC_IMPORTANCE"),
     use_reflection=_env_flag("TOWNMIND_USE_REFLECTION"),

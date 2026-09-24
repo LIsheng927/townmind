@@ -20,6 +20,7 @@ from typing import Annotated, Any, Callable, Literal
 from pydantic import BaseModel, Field
 
 from . import fallback, policy, safety, world
+from . import grounding as grounding_mod
 from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
 from .memory import MMR_LAMBDA, Memory, MemoryStore, _cosine, conveys, format_age, retold_importance
@@ -329,6 +330,8 @@ class Agent:
         max_concurrent_llm: int = 4,  # 同一时刻最多有几个大模型请求在路上
         safety_layers: frozenset[str] = frozenset({"input", "prompt", "output", "memory"}),  # 评测时可逐层关闭
         guard_model: Any | None = None,  # 可选：guard/ 训练出来的 LoRA 分类器（townmind.guard_model.GuardModel）
+        grounding: Any | None = None,  # 可选：带依据的 NLI 核查（townmind.grounding.GroundingChecker）。只在 guard
+        # 判"编造"时出面：依据（设定 + 人设 + 记忆）明明能推出这句话，就推翻 guard——救回被误判的真话
         embedder: Any | None = None,  # 可选：语义检索用的 embedding 客户端（townmind.llm.embeddings.OpenAIEmbedder）
         dynamic_importance: bool = False,  # 让大模型给每条新记忆打重要度分，换掉写死的常量；多一次 LLM 调用，默认关
         use_reflection: bool = False,  # 累计重要度到一定量就反思一次、提炼出更高层的记忆；多一次 LLM 调用，默认关
@@ -360,6 +363,7 @@ class Agent:
         # 是可选依赖，agent.py 是热路径、有 124 个单元测试，不应该因为选装的推理库没装
         # 就连带 import 失败。这里只是"鸭子类型"地调用 .classify(npc_id, text)。
         self.guard_model = guard_model
+        self.grounding = grounding
         # 同理鸭子类型：只要求有一个 async embed(list[str]) -> list[list[float]] 方法。
         # 没传（比如没配 OPENAI_API_KEY）时为 None，_remember/recall 里据此优雅退化，
         # 记忆的"相关度"这一项从语义相似度变回"认不认人"，不影响别的功能。
@@ -494,6 +498,25 @@ class Agent:
                 )
         return self._fallback(npc_id, heard, nearby, status), "fallback"
 
+    async def _evidence_vetoes(self, npc_id: str, text: str, memories: list[str] = ()) -> bool:
+        """guard 说这句是编造——依据能不能推翻它。只有配了 grounding、且蕴含概率过
+        VETO_THRESHOLD 才算推翻；不可用/异常一律不推翻（宁可信 guard，也不让编造漏过去）。"""
+        if self.grounding is None:
+            return False
+        try:
+            score = await asyncio.to_thread(self.grounding.supported, npc_id, text, list(memories))
+        except Exception as e:
+            log.warning("[%s] grounding 调用异常（%s: %s），不推翻 guard", npc_id, type(e).__name__, e)
+            return False
+        if score is None:
+            return False
+        self.stats["grounding_checks"] += 1
+        if score >= grounding_mod.VETO_THRESHOLD:
+            self.stats["guard_overruled_by_evidence"] += 1
+            log.info("[%s] guard 判编造，但依据支持（蕴含 %.2f），推翻：%s", npc_id, score, text)
+            return True
+        return False
+
     async def _consult_guard_model(self, npc_id: str, text: str, res: safety.GuardResult) -> safety.GuardResult:
         """guard model 推理是同步、阻塞的调用（CPU 上一次生成可能要几百毫秒到一两秒），
         丢到线程池里跑，不能直接 await 一个同步函数——不然会卡住事件循环，连带卡住这一刻
@@ -506,6 +529,8 @@ class Agent:
         if label is None or label == "ok":
             return res  # None：模型不可用；"ok"：模型也没查出问题——都维持正则的判断
         self.stats["guard_model_calls"] += 1
+        if label == "fabricated" and await self._evidence_vetoes(npc_id, text):
+            return res  # 依据支持这句话：guard 误判，按正则的结论放行
         return safety.GuardResult(False, text, [f"guard_model_{label}"])
 
     def whisper(self, npc_id: str, text: str, topic: str, importance: int = 9) -> dict:
@@ -753,7 +778,7 @@ class Agent:
             except Exception as e:  # 跟 _consult_guard_model 同一个哲学：这一层的异常不该拖垮决策
                 log.warning("[%s] guard model 核对记忆时异常（%s: %s），跳过这条", npc_id, type(e).__name__, e)
                 continue
-            if label == "fabricated":
+            if label == "fabricated" and not await self._evidence_vetoes(npc_id, said):
                 flagged.append((m, said))
         return flagged
 
