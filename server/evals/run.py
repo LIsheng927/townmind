@@ -24,6 +24,12 @@ CONFIGS = {
     "no_memory": dict(llm=True, use_memory=False, use_lore=True),
     "no_lore": dict(llm=True, use_memory=True, use_lore=False),
     "no_llm": dict(llm=False, use_memory=True, use_lore=True),  # 完全不用大模型：纯规则基线
+    # 日程（规划层）：没人搭话时按日程行动而不是随机闲逛。offline 下日程来自模板，real 下由模型按人设写
+    "plans": dict(llm=True, use_memory=True, use_lore=True, use_plans=True),
+    "no_llm_plans": dict(llm=False, use_memory=True, use_lore=True, use_plans=True),
+    # 事件驱动的门：有事件才问模型。跟日程配着测——日程把搭档锁在同一岗位，原来的门一整天开着
+    "gate": dict(llm=True, use_memory=True, use_lore=True, event_gate=True),
+    "plans_gate": dict(llm=True, use_memory=True, use_lore=True, use_plans=True, event_gate=True),
 }
 RESULTS_DIR = Path(__file__).parent / "results"
 
@@ -44,6 +50,8 @@ async def run_config(name: str, llm_kind: str, seconds: float, seed: int) -> tup
         rng=random.Random(seed),
         use_memory=opts["use_memory"],
         use_lore=opts["use_lore"],
+        use_plans=opts.get("use_plans", False),
+        event_gate=opts.get("event_gate", False),
     )
     agent.trace = []
     t0 = clock.t

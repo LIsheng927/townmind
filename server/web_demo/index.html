@@ -139,6 +139,8 @@ const FLAG_META = [
   ["assertive_sharing", "分享提示：硬", "关 = 软提示（实测约 8% 说出口）；开 = 够重要的事要求这句话里提一下"],
   ["use_relationships", "关系 / 信任", "开着 = 信不过的人听不到你知道的事"],
   ["compress_conversations", "对话压缩", "对话散场后把流水账压成一条摘要"],
+  ["use_plans", "日程（规划层）", "没人搭话时按今天的日程行动，不再随机闲逛；每人每游戏日一次调用"],
+  ["event_gate", "事件驱动的门", "有人说话 / 有人新来 / 有任务 / 隔 90 秒主动一次才问模型；关 = 附近有人就问"],
   ["group", "其他增强（每个都多一次 LLM 调用）"],
   ["dynamic_importance", "动态重要度", "让大模型给每条记忆打分"],
   ["use_reflection", "反思", "把若干事件提炼成更高层认识"],
@@ -156,6 +158,7 @@ const STAT_META = [
   ["heard_marked_as_hearsay", "听来的按传闻记"], ["conversations_ended_by_timeout", "对话自然散场"],
   ["conversations_compressed", "压缩的对话"], ["lines_compressed", "压掉的流水账"],
   ["reflections", "反思"], ["relationship_updates", "关系更新"], ["guard_blocked", "输出被拦"],
+  ["gate_skipped_presence", "有人在旁边但没事件、没问模型"], ["plan_calls", "生成日程"], ["plans_from_template", "日程用了模板"], ["plan_moves", "按日程赶路"], ["plan_stays", "按日程待着"],
 ];
 
 // ---------- 状态 ----------
@@ -422,6 +425,7 @@ function renderStats() {
     html += `<span class="k">${esc(label)}</span><span>${d(k)}</span><span style="color:#7a7267">${stats[k] || 0}</span>`;
   }
   html += `<span class="k">熔断器</span><span></span><span style="color:#7a7267">${esc(stats.breaker || "")}</span>`;
+  if (stats.game_time) html += `<span class="k">游戏时间</span><span></span><span style="color:#7a7267">${esc(stats.game_time)}</span>`;
   document.getElementById("statGrid").innerHTML = html;
 }
 function pollAll() { pollStats(); pollRecall(); pollRumor(); }

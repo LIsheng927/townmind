@@ -42,6 +42,21 @@ class OfflineLLM:
     async def choose_tool(self, system, user, tools):
         h = zlib.crc32(user.encode("utf-8"))
         usage = {"input_tokens": len(user) // 2, "output_tokens": 20}
+        names = {t["name"] for t in tools}
+        if names == {"write_plan"}:
+            # 日程（规划层）的假日程：确定性地按提示词哈希错开时段，够验证流程；
+            # 真实模型写的日程长什么样要看 --llm real。这里要连 system 一起哈希——写日程时
+            # user 对每个 NPC 都是同一句"请安排今天的日程"，人设在 system 里，只哈希 user
+            # 十个人会拿到一模一样的日程、同一分钟挤到同一个地方
+            h = zlib.crc32((system + user).encode("utf-8"))
+            k = h % 3
+            return ToolCall("write_plan", {"blocks": [
+                {"start": 0, "end": 7, "place": PLACE_NAMES[h % len(PLACE_NAMES)], "activity": "休息"},
+                {"start": 7, "end": 11 + k, "place": PLACE_NAMES[h % len(PLACE_NAMES)], "activity": "干活"},
+                {"start": 11 + k, "end": 12 + k, "place": "广场", "activity": "歇一会"},
+                {"start": 12 + k, "end": 18 + k, "place": PLACE_NAMES[(h + 1) % len(PLACE_NAMES)], "activity": "干活"},
+                {"start": 18 + k, "end": 24, "place": "酒馆", "activity": "聊天"},
+            ]}, **usage)
         if "已经说了 3 句话" in user or h % 7 == 0:
             return ToolCall("end_conversation", {"farewell": "我先去忙了，再见！"}, **usage)
         if "你刚听到" in user or h % 3 != 0:

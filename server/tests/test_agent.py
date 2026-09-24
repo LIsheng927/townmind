@@ -2078,3 +2078,122 @@ def test_grounding_unavailable_keeps_guard_verdict():
     a = Agent(None, guard_model=_FakeGuard("fabricated"), grounding=_FakeGrounding(None))
     res = asyncio.run(a._consult_guard_model("alice", "国王要收我做徒弟", safety.GuardResult(True, "x", [])))
     assert not res.ok, "grounding 不可用时不能推翻 guard——宁可信 guard 也不能放过编造"
+
+
+# ---------- 日程（规划层） ----------
+def _alone(agent, npc="alice", pos=(0.0, -6.0)):
+    """附近没人：走"没事发生"的分支。"""
+    return asyncio.run(agent.decide(npc, {"pos": list(pos)}))
+
+
+def test_plans_off_by_default_wander_unchanged():
+    a = Agent(None)
+    assert a.use_plans is False and a.planner.get("alice", a.clock()) is None
+    _alone(a)
+    assert a.planner.get("alice", a.clock()) is None and a.stats.get("plan_moves", 0) == 0
+
+
+def test_template_plan_drives_npc_to_the_right_place_and_then_keeps_it_there():
+    clock = FakeClock()
+    a = Agent(None, use_plans=True, clock=clock)  # 没有大模型：日程用模板
+    r = _alone(a)  # 开服 = 早上 7 点，Alice 该在面包店干活
+    assert a.planner.source("alice", clock()) == "template" and a.stats["plans_from_template"] == 1
+    assert r["name"] == "move_to" and r["place"] == "面包店" and a.stats["plan_moves"] == 1
+    bakery = world.get_location("面包店")
+    r = _alone(a, pos=(bakery.x, bakery.z))  # 已经到了：待着
+    assert r["name"] == "idle" and a.stats["plan_stays"] == 1
+
+
+def test_plan_switches_place_with_game_hour():
+    clock = FakeClock()
+    a = Agent(None, use_plans=True, clock=clock)
+    _alone(a)
+    day = a.game_clock.day_seconds
+    clock.t += day / 24 * 12  # 7 点 -> 19 点：模板日程里是酒馆
+    r = _alone(a)
+    assert r["name"] == "move_to" and r["place"] == "酒馆"
+
+
+def test_plan_is_regenerated_each_game_day_only():
+    clock = FakeClock()
+    a = Agent(None, use_plans=True, clock=clock)
+    _alone(a); _alone(a)
+    assert a.stats["plans_from_template"] == 1  # 同一天不重复生成
+    clock.t += a.game_clock.day_seconds
+    _alone(a)
+    assert a.stats["plans_from_template"] == 2
+
+
+def test_llm_written_plan_is_used_and_validated():
+    good = ToolCall("write_plan", {"blocks": [
+        {"start": 6, "end": 12, "place": "面包店", "activity": "烤面包"},
+        {"start": 12, "end": 24, "place": "广场", "activity": "摆摊"},
+    ]})
+    a = Agent(ScriptedLLM([good]), use_plans=True, clock=FakeClock())
+    r = _alone(a)
+    assert a.planner.source("alice", a.clock()) == "llm" and a.stats["plan_calls"] == 1
+    assert r["place"] == "面包店"
+    # 格式不对（时段重叠）：退回模板，不崩。编造地点不在这里测——那种段会被
+    # coerce_places 直接丢掉、其余照用（见 test_planner）
+    bad = ToolCall("write_plan", {"blocks": [
+        {"start": 6, "end": 12, "place": "面包店", "activity": "a"},
+        {"start": 10, "end": 14, "place": "广场", "activity": "b"},
+    ]})
+    b = Agent(ScriptedLLM([bad]), use_plans=True, clock=FakeClock())
+    _alone(b)
+    assert b.planner.source("alice", b.clock()) == "template"
+
+
+def test_prompt_mentions_schedule_and_game_time():
+    plan = ToolCall("write_plan", {"blocks": [{"start": 6, "end": 12, "place": "面包店", "activity": "烤面包"}]})
+    llm = ScriptedLLM([plan, ToolCall("say", {"text": "早"})])
+    a = Agent(llm, use_plans=True, clock=FakeClock())
+    decide(a)  # 有人在旁边：会问大模型，提示词里该带日程
+    assert "按你今天的日程" in llm.users[-1] and "烤面包" in llm.users[-1] and "上午 07:00" in llm.users[-1]
+
+
+# ---------- 事件驱动的门 ----------
+def test_event_gate_skips_silent_coworker_after_first_greeting():
+    """搭档一直站在旁边、谁也没说话：第一次见面问一次模型，之后不再问，直到隔够 INITIATIVE_INTERVAL。"""
+    from townmind.agent import INITIATIVE_INTERVAL
+
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("idle", {"seconds": 3})] * 5)
+    a = Agent(llm, event_gate=True, clock=clock)
+    a.positions["bob"] = (1.0, 1.0)
+    asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    assert len(llm.users) == 1  # bob 是新来的：问一次
+    for _ in range(3):
+        clock.t += 15
+        asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    assert len(llm.users) == 1 and a.stats["gate_skipped_presence"] == 3  # 老搭档静默共处：不问
+    clock.t += INITIATIVE_INTERVAL
+    asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    assert len(llm.users) == 2  # 隔够了：主动一次
+
+
+def test_event_gate_still_answers_when_spoken_to_or_newcomer_arrives():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("idle", {"seconds": 3})] * 5)
+    a = Agent(llm, event_gate=True, clock=clock)
+    a.positions["bob"] = (1.0, 1.0)
+    asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    clock.t += 15
+    a.hear_player("你好呀", (1.0, 0.0))  # 有人说话：算事件
+    asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    assert len(llm.users) == 2
+    clock.t += 15
+    a.positions["carol"] = (1.0, -1.0)  # 新来的人：算事件
+    asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+    assert len(llm.users) == 3
+
+
+def test_event_gate_off_keeps_presence_behaviour():
+    clock = FakeClock()
+    llm = ScriptedLLM([ToolCall("idle", {"seconds": 3})] * 3)
+    a = Agent(llm, clock=clock)
+    a.positions["bob"] = (1.0, 1.0)
+    for _ in range(3):
+        asyncio.run(a.decide("alice", {"pos": [0, 0]}))
+        clock.t += 15
+    assert len(llm.users) == 3 and a.stats.get("gate_skipped_presence", 0) == 0
