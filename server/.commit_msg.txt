@@ -1,0 +1,17 @@
+feat(safety): 带依据的核查换成 XLM-R large；探针脚本；README 补一节
+
+evals/grounding_probe.py 拿 9 条"换了说法的真话"做两种喂法 × 两个模型：
+
+  依据拼成一段喂       0/9   相关的那句被淹没，逐条喂才行（保持 grounding.py 的做法）
+  mDeBERTa-base 逐条   4/9
+  XLM-R large 逐条     6/9   编造 3 条全 0.00 没漏；认出的都是 0.9~1.0，很干净
+
+剩下认不出的三条：一条寒暄，两条带"小尾巴"（"……，镇上人都知道"）——NLI 是整句必须
+被推出，多一个设定里没有的从句就算不蕴含。这是方法的边界，换更大的模型也不会变。
+
+默认模型换成 joeddav/xlm-roberta-large-xnli（约 2.2GB，TOWNMIND_GROUNDING_MODEL 可换回
+base）。依赖组补 protobuf（慢分词器转快分词器要用）。
+
+guard_fabrication 重跑（16 条）：正则 62%、guard 88%、NLI 单独把关 81%、guard+证据否决
+88%。5 条真话换说法 guard 全判对，证据否决一次没触发——这一层是保险，没赔付过，README
+如实写。
