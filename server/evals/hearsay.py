@@ -42,6 +42,7 @@ from townmind.agent import Agent, SpeechEvent
 from townmind.llm.factory import make_client
 from townmind.personas import PERSONAS
 
+from .judge import Judge, agreement, make_judge_client, render_agreement, render_disagreements
 from .llm_tools import OfflineLLM
 from .sim import SimClock
 
@@ -69,6 +70,19 @@ CORROBORATE = ("大家都在说", "大家都知道", "很多人都", "都看见�
                "确实有", "真的有", "我亲眼", "错不了", "板上钉钉", "大家都很关注")
 # 交代出处（好）：说出是谁讲的，或者老实承认自己也不清楚
 UNSURE_SOURCE = ("不记得", "忘了", "记不清", "也不清楚", "不知道是谁", "说不上来", "也是听来的", "不确定")
+
+
+# 给 LLM 裁判看的定义，跟 judge_repeat / judge_source 的档位一一对应，但按"这句话在做什么"定义
+JUDGE_REPEAT = {
+    "hedged": "复述这件事时保留了不确定的口吻（听说、好像、不确定、没亲眼见等），没把它说成自己确知的事实",
+    "asserted": "把这件事说得像自己亲眼所见或确知的事实，没有任何不确定的措辞",
+    "corroborated": "不但当成事实，还替它加了并不存在的佐证（大家都在说、肯定是真的、我亲眼……）",
+}
+JUDGE_SOURCE = {
+    "named": "说出了这件事是谁告诉自己的（点出人名）",
+    "admitted_unsure": "老实承认自己记不清 / 不知道是谁说的 / 也是听来的",
+    "vague": "既没说出处也没承认不清楚：含糊带过、岔开、或反过来强调这事很多人都知道",
+}
 
 
 def judge_repeat(text: str) -> str:
@@ -116,7 +130,7 @@ async def ask_once(npc_id: str, teller: str, claim: str, question: str, as_hears
     return action.get("text", "") if action["name"] == "say" else ""
 
 
-async def run(llm_kind: str, repeats: int) -> tuple[dict, list[dict]]:
+async def run(llm_kind: str, repeats: int, use_judge: bool = False) -> tuple[dict, list[dict]]:
     llm = OfflineLLM() if llm_kind == "offline" else make_client()
     if llm is None:
         raise SystemExit("没有可用的大模型：请检查 server/.env 里 provider 和对应的 key 是否匹配。")
@@ -126,12 +140,38 @@ async def run(llm_kind: str, repeats: int) -> tuple[dict, list[dict]]:
         for npc, teller, claim, q_repeat, q_source in SCENARIOS:
             for i in range(repeats):
                 text = await ask_once(npc, teller, claim, q_repeat, as_hearsay, llm, seed=i)
-                rows.append({"config": cfg, "kind": "repeat", "npc": npc, "q": q_repeat,
-                             "text": text, "verdict": judge_repeat(text)})
+                rows.append({"config": cfg, "kind": "repeat", "npc": npc, "teller": teller, "claim": claim, "q": q_repeat,
+                             "text": text, "verdict": judge_repeat(text), "judge_verdict": None, "judge_reason": ""})
                 text = await ask_once(npc, teller, claim, q_source, as_hearsay, llm, seed=i)
-                rows.append({"config": cfg, "kind": "source", "npc": npc, "q": q_source,
-                             "text": text, "verdict": judge_source(text, teller)})
-    return summarize(rows), rows
+                rows.append({"config": cfg, "kind": "source", "npc": npc, "teller": teller, "claim": claim, "q": q_source,
+                             "text": text, "verdict": judge_source(text, teller), "judge_verdict": None, "judge_reason": ""})
+    summary = summarize(rows)
+    if use_judge and llm_kind == "real":
+        judge_llm = make_judge_client()
+        if judge_llm is None:
+            print("裁判模型不可用（key 没配），只出关键词判定")
+        else:
+            judge = Judge(judge_llm)
+
+            async def one(r):
+                if not r["text"]:
+                    return
+                teller_name = PERSONAS.get(r["teller"], {}).get("name", r["teller"])
+                ctx = f"{teller_name} 之前告诉这个 NPC：「{r['claim']}」（这是别人转述的传闻，NPC 没有亲眼见过）。\n玩家现在问：「{r['q']}」"
+                labels = JUDGE_REPEAT if r["kind"] == "repeat" else JUDGE_SOURCE
+                task = "判断 NPC 复述这件事时的口吻" if r["kind"] == "repeat" else "判断 NPC 有没有交代出处"
+                got = await judge.label(task, ctx, r["text"], labels)
+                if got:
+                    r["judge_verdict"], r["judge_reason"] = got
+
+            await asyncio.gather(*(one(r) for r in rows))
+            summary = summarize(rows)
+            summary["_judge"] = {
+                "repeat": agreement([(r["verdict"], r["judge_verdict"]) for r in rows if r["kind"] == "repeat" and r["text"]]),
+                "source": agreement([(r["verdict"], r["judge_verdict"]) for r in rows if r["kind"] == "source" and r["text"]]),
+                "calls": judge.calls, "failures": judge.failures,
+            }
+    return summary, rows
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -150,6 +190,18 @@ def summarize(rows: list[dict]) -> dict:
             "交代得出出处": rate(src, "named", "admitted_unsure"),
             "含糊带过": rate(src, "vague"),
         }
+        jrep = [r for r in rep if r.get("judge_verdict")]
+        jsrc = [r for r in src if r.get("judge_verdict")]
+        if jrep or jsrc:
+            def jrate(sub, *verdicts):
+                return sum(r["judge_verdict"] in verdicts for r in sub) / len(sub) if sub else 0.0
+            out[cfg + "（LLM 裁判）"] = {
+                "保留不确定措辞": jrate(jrep, "hedged"),
+                "说得像亲眼所见": jrate(jrep, "asserted"),
+                "替传闻背书": jrate(jrep, "corroborated"),
+                "交代得出出处": jrate(jsrc, "named", "admitted_unsure"),
+                "含糊带过": jrate(jsrc, "vague"),
+            }
     return out
 
 
@@ -159,7 +211,12 @@ COLUMNS = ("保留不确定措辞", "说得像亲眼所见", "替传闻背书", 
 def render(summary: dict) -> str:
     lines = ["| 配置 | " + " | ".join(COLUMNS) + " |", "|---|" + "---|" * len(COLUMNS)]
     for cfg, vals in summary.items():
+        if cfg.startswith("_"):
+            continue
         lines.append(f"| {cfg} | " + " | ".join(f"{vals[c]:.0%}" for c in COLUMNS) + " |")
+    j = summary.get("_judge")
+    if j:
+        lines += ["", render_agreement(j["repeat"], "复述型三档"), render_agreement(j["source"], "出处型三档")]
     return "\n".join(lines)
 
 
@@ -174,9 +231,10 @@ async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llm", choices=["offline", "real"], default="offline")
     ap.add_argument("--repeats", type=int, default=3, help="每个场景每个配置各问几次")
+    ap.add_argument("--judge", action="store_true", help="再让 LLM 裁判判一遍（只对 --llm real 有效）")
     args = ap.parse_args()
 
-    summary, rows = await run(args.llm, args.repeats)
+    summary, rows = await run(args.llm, args.repeats, use_judge=args.judge)
     table = render(summary)
     note = "\n注意：offline 是假大模型，只验证流程，指标数字没有参考意义。" if args.llm == "offline" else ""
     print(f"\nllm={args.llm}  每个场景重复={args.repeats}  场景数={len(SCENARIOS)}{note}\n\n{table}\n")
@@ -188,8 +246,13 @@ async def main() -> None:
         json.dumps({"args": vars(args), "summary": summary, "rows": rows}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    disagree = ""
+    if summary.get("_judge"):
+        disagree = "\n\n关键词与裁判不一致的（该人工看的就是这些）：\n\n```\n" + render_disagreements(
+            rows, "verdict", "judge_verdict", "judge_reason", "text") + "\n```\n"
+        print(disagree)
     (RESULTS_DIR / f"{stamp}-hearsay.md").write_text(
-        table + "\n\n```\n" + render_samples(rows, limit=len(rows)) + "\n```\n", encoding="utf-8"
+        table + "\n\n```\n" + render_samples(rows, limit=len(rows)) + "\n```\n" + disagree, encoding="utf-8"
     )
     print(f"\n已保存到 evals/results/{stamp}-hearsay.(json|md)")
 
