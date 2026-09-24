@@ -30,6 +30,8 @@ safety.hearsay_markers() 把它捡回来，听到的人按 hop=1（传闻）记�
 用法（在 server 目录下）：
   uv run python -m evals.hearsay --llm offline           # 不花钱，只验证流程
   uv run python -m evals.hearsay --llm real --repeats 5  # 真实模型，数字才有意义
+  uv run python -m evals.hearsay --llm real --repeats 3 --judge --scenarios evals/scenarios/hearsay.json
+                                                         # 30 个生成 + 人工过的场景，代替上面 5 个手写的
 """
 import argparse
 import asyncio
@@ -108,6 +110,14 @@ def judge_source(text: str, teller: str) -> str:
     return "vague"
 
 
+def load_scenarios(path: Path) -> list[tuple[str, str, str, str, str]]:
+    """从 evals/gen_scenarios.py hearsay 生成、人工过过的场景库里读，转成跟 SCENARIOS 一样的元组。"""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not data.get("reviewed"):
+        print(f"警告：{path.name} 标着 reviewed=false，没人看过的题只能跑流程，不能拿来下结论。")
+    return [(x["npc_id"], x["teller"], x["claim"], x["q_repeat"], x["q_source"]) for x in data["items"]]
+
+
 async def ask_once(npc_id: str, teller: str, claim: str, question: str, as_hearsay: bool, llm, seed: int) -> str:
     """把同一条传闻按 hop=1（传闻）或 hop=0（亲历事实）种进记忆，再问一句，看它怎么答。"""
     clock = SimClock()
@@ -130,14 +140,16 @@ async def ask_once(npc_id: str, teller: str, claim: str, question: str, as_hears
     return action.get("text", "") if action["name"] == "say" else ""
 
 
-async def run(llm_kind: str, repeats: int, use_judge: bool = False) -> tuple[dict, list[dict]]:
+async def run(llm_kind: str, repeats: int, use_judge: bool = False,
+              scenarios: list[tuple[str, str, str, str, str]] | None = None) -> tuple[dict, list[dict]]:
+    scenarios = scenarios or SCENARIOS
     llm = OfflineLLM() if llm_kind == "offline" else make_client()
     if llm is None:
         raise SystemExit("没有可用的大模型：请检查 server/.env 里 provider 和对应的 key 是否匹配。")
     rows: list[dict] = []
     for as_hearsay in (False, True):
         cfg = "标成传闻（hop=1）" if as_hearsay else "当成亲历事实（hop=0，改动之前）"
-        for npc, teller, claim, q_repeat, q_source in SCENARIOS:
+        for npc, teller, claim, q_repeat, q_source in scenarios:
             for i in range(repeats):
                 text = await ask_once(npc, teller, claim, q_repeat, as_hearsay, llm, seed=i)
                 rows.append({"config": cfg, "kind": "repeat", "npc": npc, "teller": teller, "claim": claim, "q": q_repeat,
@@ -232,18 +244,21 @@ async def main() -> None:
     ap.add_argument("--llm", choices=["offline", "real"], default="offline")
     ap.add_argument("--repeats", type=int, default=3, help="每个场景每个配置各问几次")
     ap.add_argument("--judge", action="store_true", help="再让 LLM 裁判判一遍（只对 --llm real 有效）")
+    ap.add_argument("--scenarios", type=Path, default=None, help="场景库 JSON（evals/gen_scenarios.py hearsay 生成）；不传用内置 5 个")
     args = ap.parse_args()
 
-    summary, rows = await run(args.llm, args.repeats, use_judge=args.judge)
+    scenarios = load_scenarios(args.scenarios) if args.scenarios else SCENARIOS
+    summary, rows = await run(args.llm, args.repeats, use_judge=args.judge, scenarios=scenarios)
     table = render(summary)
     note = "\n注意：offline 是假大模型，只验证流程，指标数字没有参考意义。" if args.llm == "offline" else ""
-    print(f"\nllm={args.llm}  每个场景重复={args.repeats}  场景数={len(SCENARIOS)}{note}\n\n{table}\n")
+    print(f"\nllm={args.llm}  每个场景重复={args.repeats}  场景数={len(scenarios)}{note}\n\n{table}\n")
     print("--- 抽样 ---\n" + render_samples(rows))
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     (RESULTS_DIR / f"{stamp}-hearsay.json").write_text(
-        json.dumps({"args": vars(args), "summary": summary, "rows": rows}, ensure_ascii=False, indent=2),
+        json.dumps({"args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+                    "summary": summary, "rows": rows}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     disagree = ""

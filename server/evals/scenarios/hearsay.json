@@ -1,0 +1,189 @@
+{
+  "kind": "hearsay",
+  "reviewed": true,
+  "items": [
+    {
+      "npc_id": "alice",
+      "teller": "bob",
+      "claim": "最近邻镇有人闹病，我们要小心点。",
+      "q_repeat": "听说邻镇的事是真的吗？",
+      "q_source": "是谁和你说的呀？"
+    },
+    {
+      "npc_id": "carol",
+      "teller": "dan",
+      "claim": "镇长快要退休了。",
+      "q_repeat": "镇长真的要退休吗？",
+      "q_source": "这个消息是谁透露的？"
+    },
+    {
+      "npc_id": "finn",
+      "teller": "elsa",
+      "claim": "今年的啤酒原料可能会短缺。",
+      "q_repeat": "真的缺啤酒原料吗？",
+      "q_source": "是谁说的这个消息？"
+    },
+    {
+      "npc_id": "greta",
+      "teller": "iris",
+      "claim": "杂货铺新进了一些罕见的香料。",
+      "q_repeat": "真的吗，杂货铺进了新香料？",
+      "q_source": "你听谁说的呀？"
+    },
+    {
+      "npc_id": "jonas",
+      "teller": "milo",
+      "claim": "最近有商队经过这里，小心物品安全。",
+      "q_repeat": "商队经过是不是真的？",
+      "q_source": "你这消息是从哪里听来的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "bob",
+      "claim": "Elsa 可能要把磨坊卖掉。",
+      "q_repeat": "真的吗？磨坊会卖？",
+      "q_source": "是谁告诉你的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "bob",
+      "claim": "面包店要引进新的甜馅饼。",
+      "q_repeat": "听说是真的要引进吗？",
+      "q_source": "这个消息谁说的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "dan",
+      "claim": "杂货铺要开分店了。",
+      "q_repeat": "杂货铺真要开分店了？",
+      "q_source": "你这消息从哪儿听来的？"
+    },
+    {
+      "npc_id": "bob",
+      "teller": "carol",
+      "claim": "有一家新酒馆要在镇上开张了。",
+      "q_repeat": "新酒馆真的要开张了吗？",
+      "q_source": "谁和你说的？"
+    },
+    {
+      "npc_id": "elsa",
+      "teller": "finn",
+      "claim": "小镇的广场要改造了，可能会修喷泉。",
+      "q_repeat": "广场真的要改造吗？",
+      "q_source": "这个消息谁告诉你的？"
+    },
+    {
+      "npc_id": "dan",
+      "teller": "jonas",
+      "claim": "镇上可能要来一个新裁缝。",
+      "q_repeat": "新裁缝真的要来吗？",
+      "q_source": "这事谁跟你说的？"
+    },
+    {
+      "npc_id": "finn",
+      "teller": "alice",
+      "claim": "铁匠铺可能要扩建，增加铸造炉。",
+      "q_repeat": "铁匠铺真要扩建吗？",
+      "q_source": "你听谁说的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "dan",
+      "claim": "镇上有家新面包店要开了。",
+      "q_repeat": "新面包店要开了吗？",
+      "q_source": "你是从谁那儿听到的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "dan",
+      "claim": "杂货铺的日用品价格要涨了。",
+      "q_repeat": "日用品要涨价吗？",
+      "q_source": "是从哪儿听说的？"
+    },
+    {
+      "npc_id": "bob",
+      "teller": "carol",
+      "claim": "Elsa打算买新的水轮。",
+      "q_repeat": "你是说要换水轮吗？",
+      "q_source": "这是谁跟你说的？"
+    },
+    {
+      "npc_id": "alice",
+      "teller": "dan",
+      "claim": "最近矿石的价格又涨了。",
+      "q_repeat": "矿石真的涨价了吗？",
+      "q_source": "是谁跟你说的？"
+    },
+    {
+      "npc_id": "jonas",
+      "teller": "milo",
+      "claim": "广场上的古井要清理了。",
+      "q_repeat": "古井要清理了吗？",
+      "q_source": "是谁跟你说的？"
+    },
+    {
+      "npc_id": "carol",
+      "teller": "iris",
+      "claim": "Alice想开发一种新口味的蓝莓松饼。",
+      "q_repeat": "Alice真要做新口味吗？",
+      "q_source": "谁说的？"
+    },
+    {
+      "npc_id": "dan",
+      "teller": "finn",
+      "claim": "镇上有人要搬去邻镇了。",
+      "q_repeat": "真有人要搬走吗？",
+      "q_source": "是谁告诉你的？"
+    },
+    {
+      "npc_id": "greta",
+      "teller": "jonas",
+      "claim": "Bob在铁匠铺烤坏了一把刀。",
+      "q_repeat": "烤坏刀的事是真的？",
+      "q_source": "这个消息从哪来的？"
+    },
+    {
+      "npc_id": "milo",
+      "teller": "bob",
+      "claim": "南边的路最近长了不少荆棘。",
+      "q_repeat": "路上真的有荆棘吗？",
+      "q_source": "这消息谁说的？"
+    },
+    {
+      "npc_id": "finn",
+      "teller": "elsa",
+      "claim": "Jonas考虑要换个守夜的工作。",
+      "q_repeat": "Jonas真要换工作吗？",
+      "q_source": "这个消息是谁说的？"
+    },
+    {
+      "npc_id": "iris",
+      "teller": "finn",
+      "claim": "面粉涨价后，Alice可能要涨面包价。",
+      "q_repeat": "真的吗？面包真的要涨价吗？",
+      "q_source": "是谁说的？"
+    },
+    {
+      "npc_id": "elsa",
+      "teller": "carol",
+      "claim": "广场的古井水位下降了。",
+      "q_repeat": "水位真的低了吗？",
+      "q_source": "你听谁说的？"
+    },
+    {
+      "npc_id": "bob",
+      "teller": "jonas",
+      "claim": "有户人家考虑搬去邻镇。",
+      "q_repeat": "他们真的要搬走吗？",
+      "q_source": "你从哪儿听来的？"
+    },
+    {
+      "npc_id": "carol",
+      "teller": "greta",
+      "claim": "磨坊打算升级磨粉设备。",
+      "q_repeat": "他们真的会换设备吗？",
+      "q_source": "是谁告诉你的？"
+    }
+  ],
+  "review_note": "生成 30 条，删 4 条——3 条传闻其实是设定里真有的事（水轮转得不稳、麦子减产、铁矿供不上），传闻抑制测的是设定外的消息，真事没有可抑制的；1 条追问「怎么那么多外乡人」不是在问真假。改 3 条出处型追问：「这消息准不准」「可信吗」不是在问是谁说的，统一改成「是谁跟你说的」。另外 15 条传闻本身以「听说 / 有人说 / 小道消息说」开头，统一去掉——传闻是以讲述者的口吻种进记忆的，讲述者自己带「听说」会让关键词判定把 NPC 照抄的「听说」算成保留不确定措辞，跟内置 5 条（都是平铺直叙）口径不一致。留 26。"
+}
