@@ -144,7 +144,22 @@ def summarize(trace: list[dict], stats: dict, latencies: list[float], seconds: f
         "invented_rate": invented_rate(says),
         "grounded_rate": grounded_rate(says),
         "response_rate": response_rate(says),
+        # ---- "过日子"那组：日程（规划层）改变的是这几项，不是对话质量 ----
+        "alone_rate": _rate(sum(1 for e in trace if not e.get("nearby")), len(trace)),
+        "mean_nearby": (sum(len(e.get("nearby", [])) for e in trace) / len(trace)) if trace else 0.0,
+        "distinct_places": distinct_places(trace),
+        "plan_stay_rate": _rate(stats.get("plan_stays", 0), stats.get("plan_stays", 0) + stats.get("plan_moves", 0)),
     }
+
+
+def distinct_places(trace: list[dict]) -> float:
+    """每个 NPC 平均去过几个不同的地点。随机闲逛会把这个数刷高（哪儿都去），按日程过日子会压低
+    （该在哪就在哪），所以它不是"越高越好"，是拿来看行为模式变没变的。"""
+    seen: dict[str, set] = {}
+    for e in trace:
+        if e.get("place"):
+            seen.setdefault(e["npc"], set()).add(e["place"])
+    return (sum(len(s) for s in seen.values()) / len(seen)) if seen else 0.0
 
 
 METRICS = [
@@ -162,6 +177,10 @@ METRICS = [
     ("invented_rate", "编造地点/活动率（越低越好）", "{:.1%}"),
     ("grounded_rate", "引用真实设定率（越高越好）", "{:.1%}"),
     ("response_rate", "被回应率（越高越好）", "{:.1%}"),
+    ("alone_rate", "决策时附近没人的比例", "{:.1%}"),
+    ("mean_nearby", "决策时附近平均几个人", "{:.2f}"),
+    ("distinct_places", "每个 NPC 去过几个不同地点", "{:.1f}"),
+    ("plan_stay_rate", "按日程行动中「已在该在的地方」占比", "{:.1%}"),
 ]
 
 

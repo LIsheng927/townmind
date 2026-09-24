@@ -56,6 +56,10 @@ app.state.agent = Agent(
     use_relationships=_env_flag("TOWNMIND_USE_RELATIONSHIPS"),
     use_gossip=_env_flag("TOWNMIND_USE_GOSSIP"),
     assertive_sharing=_env_flag("TOWNMIND_ASSERTIVE_SHARING", default=True),
+    use_plans=_env_flag("TOWNMIND_USE_PLANS"),
+    # 服务里默认开：真实数据调用砍一半、对话质量不掉（README"规划层"一节）。Agent 构造函数里
+    # 仍默认关——那是消融基线，几十个测试按"附近有人就问"写的
+    event_gate=_env_flag("TOWNMIND_EVENT_GATE", default=True),
     compress_conversations=_env_flag("TOWNMIND_COMPRESS_CONVERSATIONS"),
     # 这两个真实数据没测出正向收益（见 README"CoVe 式重试和 Reflexion 式教训记忆"
     # 小节），保持默认关。这里照样接上环境变量，是为了想重新验证时不用改代码——
@@ -125,7 +129,8 @@ async def set_flags(changes: dict[str, bool | float]) -> dict:
 @app.get("/stats")
 async def stats() -> dict:
     """决策统计：大模型调用次数、失败次数、规则决策次数。用于观察成本。"""
-    return {**app.state.agent.stats, "breaker": app.state.agent.breaker.state}
+    agent = app.state.agent
+    return {**agent.stats, "breaker": agent.breaker.state, "game_time": agent.game_clock.describe(agent.clock())}
 
 
 def _companion_status(npc_id: str) -> dict:

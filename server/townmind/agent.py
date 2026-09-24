@@ -25,6 +25,7 @@ from .breaker import CircuitBreaker
 from .llm.base import LLMClient, ToolCall
 from .memory import MMR_LAMBDA, Memory, MemoryStore, _cosine, conveys, format_age, retold_importance
 from .personas import DEFAULT_PERSONA, PERSONAS
+from .planner import WRITE_PLAN_TOOL, DailyPlan, GameClock, Planner, coerce_places, template_plan
 from .social import RelationshipBook
 from .spatial import SpatialGrid
 
@@ -54,12 +55,24 @@ class _TrackedPositions(UserDict):
 
 
 log = logging.getLogger("townmind.agent")
+
+
+class _NoPlace:
+    name = None
+
+
+_NO_PLACE = _NoPlace()  # world.location_at 返回 None 时的占位，让上面那行不用写 if
 HALF = policy.WORLD_HALF_SIZE
 NEARBY_RADIUS = 5.0  # 这个距离内算"附近"，也是能听到说话的距离
 EVENT_TTL = 30.0  # 说话事件的有效期（秒），太久以前的话不再被听到
 SAY_COOLDOWN = 6.0  # 同一个 NPC 两次说话的最短间隔（秒）
 CHAT_WINDOW = 30.0  # 统计"最近说了几句"的时间窗口（秒）
 DISENGAGE_SECONDS = 20.0  # 道别之后这么久内不再和人搭话，走去忙自己的事
+# 事件驱动的门（event_gate）：附近的人上次见到是这么久以前，才算"新来的"、值得问一次模型
+ARRIVAL_GAP = 60.0
+# 旁边有人但没有任何事件（没人说话、没人新来）时，每隔这么久允许主动搭一次话，
+# 免得两个搭档一整天面对面一句话不说
+INITIATIVE_INTERVAL = 90.0
 FOLLOW_STAND_OFFSET = 1.5  # 跟着玩家时尽量停在离玩家这么远，不叠在玩家身上
 FOLLOW_ARRIVED_RADIUS = 2.0  # 已经跟上了，不用再挪
 # 记忆的重要度（1-10）：第一版用简单规则打分
@@ -92,6 +105,8 @@ RUNTIME_BOOL_FLAGS = (
     "use_relationships",
     "use_gossip",
     "assertive_sharing",
+    "use_plans",
+    "event_gate",
     "compress_conversations",
     "distrust_own_memory",
     "expressive_dialogue",
@@ -348,6 +363,12 @@ class Agent:
         use_gossip: bool = False,  # 主动把自己知道的事讲给别人听（八卦）。不额外花 LLM 调用，
         # 只是在提示词里多给一条候选；跟 use_relationships 分开是为了能单独做消融——
         # 两个都开时，信不过的人不会听到你知道的事
+        event_gate: bool = False,  # 事件驱动的门：只有"有人说话 / 有人新来 / 有任务 / 隔了很久主动一次"才问模型；
+        # 关着时是原来的"附近有人就问"。规划层实测把搭档锁在同一岗位一整天，原来的门就一整天开着，
+        # 调用不降反升——这个开关是冲着那个发现来的。默认关，先量再说
+        use_plans: bool = False,  # 日程（规划层）：没人搭话时按"今天该在哪、干什么"行动，不再随机闲逛。
+        # 每个 NPC 每个游戏日只多一次 LLM 调用（生成日程；失败用模板）。默认关，先在 evals 里量了再说
+        game_clock: GameClock | None = None,  # 游戏时钟；不传就按默认（600 秒一天），开服时刻定为早上 7 点
         assertive_sharing: bool = True,  # 分享提示的强度。开（默认）：够重要的事（>= SHARE_ASSERTIVE_IMPORTANCE）
         # 明确要求这句话里提一下；关：软提示（"可以顺口提一句，也可以不说"）。默认开是数据定的：清空记忆、
         # 用软提示重跑，Alice 拿着一条重要度 9 的悄悄话、8 次机会全在聊肉桂卷，0 次说出口，消息死在源头
@@ -377,6 +398,18 @@ class Agent:
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
         self.assertive_sharing = assertive_sharing
+        self.use_plans = use_plans
+        self.event_gate = event_gate
+        self.last_seen: dict[str, dict[str, float]] = defaultdict(dict)  # 我上次见到某人是什么时候
+        self.last_initiative: dict[str, float] = {}  # 上次"旁边有人就问了一次模型"是什么时候
+        # 游戏时钟的 epoch 定成"开服 = 早上 7 点"：一开服 NPC 就在各自岗位上开始一天，
+        # 不用等半个游戏日才从"凌晨休息"里出来
+        if game_clock is None:
+            game_clock = GameClock()
+            game_clock.epoch = clock() - 7.0 / 24.0 * game_clock.day_seconds
+        self.game_clock = game_clock
+        self.planner = Planner(game_clock)
+        self._planning: set[str] = set()  # 正在生成日程的 NPC，防止并发决策重复生成
         self.compress_conversations = compress_conversations
         # 记忆检索的两个可调项放在 Agent 上，而不只在 MemoryStore 上：每个 NPC 一个 store、
         # 懒加载，运行时切换必须一次改到所有已加载的、以及以后才加载的（见 _mem / set_flags）
@@ -599,10 +632,26 @@ class Agent:
         self.update_position(npc_id, observation.get("pos"))
 
         now = self.clock()
+        if self.use_plans:
+            await self._ensure_plan(npc_id, now)
         heard = self._collect_heard(npc_id, now)  # 先取走"听到的话"
         nearby = self._nearby(npc_id)
         # 手头有委托任务：就算没人搭话、附近没人，也要继续一步步把任务做完，不能干等着
-        interesting = bool(heard or nearby) or npc_id in self.tasks
+        if self.event_gate:
+            # 有事件才问：有人说话、有人新来、有任务；再不然，隔够 INITIATIVE_INTERVAL 主动一次。
+            # 老搭档一直站在旁边、谁也没说话，不算事件——原来的门在这种情况下一整天开着
+            seen = self.last_seen[npc_id]
+            newcomers = [o for o, _ in nearby if now - seen.get(o, -math.inf) > ARRIVAL_GAP]
+            for o, _ in nearby:
+                seen[o] = now
+            initiative = bool(nearby) and now - self.last_initiative.get(npc_id, -math.inf) >= INITIATIVE_INTERVAL
+            interesting = bool(heard or newcomers) or npc_id in self.tasks or initiative
+            if nearby and not interesting:
+                self.stats["gate_skipped_presence"] += 1
+            if interesting and nearby:
+                self.last_initiative[npc_id] = now
+        else:
+            interesting = bool(heard or nearby) or npc_id in self.tasks
         status = self._say_status(npc_id, now)
         # 回忆：只取和眼前的人最相关、最重要、最新的几条。要在写入本轮新记忆之前取，避免"想起"刚发生的事
         involved = {o for o, _ in nearby} | {e.speaker for e in heard}
@@ -659,6 +708,12 @@ class Agent:
                 # 没事发生，或者这场对话已经聊够了：走走停停，不调用大模型；
                 # 如果正跟着玩家，这一步换成"往玩家那边挪"，同样不调用大模型（规则、零成本）
                 action, source = self._wander_or_follow(npc_id), "rule"
+        elif self.use_plans and not interesting and npc_id not in self.following:
+            # 没有大模型也照样按日程过日子：日程本来就不依赖大模型（模板兜底），
+            # 没事发生时走日程比行为树的"回岗位/随便逛逛"更像个正常的镇民
+            planned = self._follow_plan(npc_id, now)
+            if planned is not None:
+                action, source = planned, "rule"
 
         if action is None:
             action, source = self._fallback(npc_id, heard, nearby, status), "fallback"
@@ -752,7 +807,12 @@ class Agent:
                 await self._learn_from_correction(npc_id, now, suspect_said)
         if self.trace is not None:
             self.trace.append(
-                {"t": now, "npc": npc_id, "source": source, "action": dict(action), "nearby": [o for o, _ in nearby]}
+                {
+                    "t": now, "npc": npc_id, "source": source, "action": dict(action),
+                    "nearby": [o for o, _ in nearby],
+                    # 决策时人在哪个地点（不在任何地点内就是 None）：评测"按日程过日子"那组指标要用
+                    "place": (world.location_at(self.positions.get(npc_id, (0.0, 0.0))) or _NO_PLACE).name,
+                }
             )
         log.info("[%s] %s -> %s%s", npc_id, source, action, "  (end_conversation)" if ended else "")
         return action
@@ -853,8 +913,57 @@ class Agent:
         )
         return fallback.decide(ctx)
 
+    async def _ensure_plan(self, npc_id: str, now: float) -> None:
+        """今天还没有日程就生成一份：有大模型就让它按人设写（每个 NPC 每个游戏日一次），
+        写不出来（不可用 / 超时 / 格式不对）就用模板。已经有了、或者正在生成，直接返回。"""
+        if self.planner.get(npc_id, now) is not None or npc_id in self._planning:
+            return
+        self._planning.add(npc_id)
+        try:
+            plan, source = None, "template"
+            if self.llm is not None:
+                from .planner import plan_prompt
+
+                system, user = plan_prompt(npc_id)
+                call = await self._call_llm_tool(npc_id, system, user, WRITE_PLAN_TOOL, "plan_calls")
+                if call is not None:
+                    try:
+                        plan, source = DailyPlan(**coerce_places(call.arguments, npc_id)), "llm"
+                    except Exception as e:
+                        log.warning("[%s] 日程格式不对（%s: %s），用模板", npc_id, type(e).__name__, e)
+            if plan is None:
+                plan = template_plan(npc_id)
+                self.stats["plans_from_template"] += 1
+            self.planner.set(npc_id, now, plan, source)
+            log.info("[%s] 今天的日程（%s）：%s", npc_id, source, plan.describe())
+        finally:
+            self._planning.discard(npc_id)
+
+    def _follow_plan(self, npc_id: str, now: float) -> dict | None:
+        """按日程行动：此刻该在的地点不在就走过去，在了就待着。没有日程返回 None（退回闲逛）。零成本。"""
+        where = self.planner.where(npc_id, now)
+        if where is None:
+            return None
+        place, _ = where
+        loc = world.get_location(place)
+        if loc is None:
+            return None
+        me = self.positions.get(npc_id, (0.0, 0.0))
+        here = world.location_at(me)
+        if here is not None and here.name == place:
+            self.stats["plan_stays"] += 1
+            return {"name": "idle", "seconds": round(self.rng.uniform(3, 8), 1)}
+        self.stats["plan_moves"] += 1
+        x, z = loc.stand_point(self.rng)
+        return {"name": "move_to", "x": x, "z": z, "place": loc.name}
+
     def _wander(self, npc_id: str) -> dict:
-        """没事发生时的日常：一部分时间发呆，其余时间在小镇的真实地点之间走动，偏爱自己的工作地点。零成本。"""
+        """没事发生时的日常：开了日程就按日程走；否则一部分时间发呆，其余时间在小镇的真实地点
+        之间走动，偏爱自己的工作地点。零成本。"""
+        if self.use_plans:
+            planned = self._follow_plan(npc_id, self.clock())
+            if planned is not None:
+                return planned
         if self.rng.random() < 0.35:
             return {"name": "idle", "seconds": round(self.rng.uniform(2, 5), 1)}
         home = world.get_location(PERSONAS.get(npc_id, DEFAULT_PERSONA).get("home", ""))
@@ -1562,6 +1671,10 @@ class Agent:
         lines = surroundings + [
             f"附近的人：{'、'.join(nearby_text) if nearby_text else '没有人'}",
         ]
+        if self.use_plans:
+            where = self.planner.where(npc_id, now)
+            if where is not None:
+                lines.append(f"现在是{self.game_clock.describe(now)}，按你今天的日程，这会儿你在{where[0]}{where[1]}。")
         if npc_id in self.following:
             lines.append("你正在跟着玩家走。")
         if task is not None:
