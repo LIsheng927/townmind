@@ -33,6 +33,7 @@ from townmind.guard_model import GuardModel
 from townmind.llm.factory import make_client
 from townmind.personas import PERSONAS
 
+from .judge import Judge, agreement, make_judge_client, render_agreement, render_disagreements
 from .llm_tools import OfflineLLM
 from .sim import SimClock
 
@@ -75,6 +76,12 @@ CORRECTION = (
     "没听说过", "没听说",
 )
 CONFIGS = {"old_prompt": False, "new_prompt": True}  # distrust_own_memory 的值
+# 给 LLM 裁判看的标签定义——跟 judge() 的三档一一对应，但按"这句话在做什么"定义，不按关键词
+JUDGE_LABELS = {
+    "reinforced": "把早前编造的那件事当成真的，顺着往下说、补充细节或回答其中的具体问题（幻觉累积）",
+    "corrected": "明确表示自己记错/说错/没有这回事，或否认说过、否认知情（包括「没听说过」这类否认）",
+    "unclear": "既没纠正也没顺着编：岔开话题、含糊敷衍、只回应寒暄部分",
+}
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
@@ -114,7 +121,7 @@ async def ask_once(
     return action
 
 
-async def run(llm_kind: str, repeats: int) -> tuple[dict, list[dict]]:
+async def run(llm_kind: str, repeats: int, use_judge: bool = False) -> tuple[dict, list[dict]]:
     llm = OfflineLLM() if llm_kind == "offline" else make_client()
     if llm is None:
         raise SystemExit("没有可用的大模型：请检查 server/.env 里 provider 和对应的 key 是否匹配。")
@@ -130,8 +137,28 @@ async def run(llm_kind: str, repeats: int) -> tuple[dict, list[dict]]:
                 rows.append({
                     "config": cfg, "npc": npc, "fabricated": fabricated, "question": question,
                     "text": text, "action": action["name"], "source": action["source"], "verdict": verdict,
+                    "judge_verdict": None, "judge_reason": "",
                 })
-    return summarize(rows) | {"guard_model_available": guard_ready}, rows
+    judge_stats = None
+    if use_judge and llm_kind == "real":
+        judge_llm = make_judge_client()
+        if judge_llm is None:
+            print("裁判模型不可用（key 没配），只出关键词判定")
+        else:
+            judge_obj = Judge(judge_llm)  # 别叫 judge：会遮住上面那个关键词判定函数
+
+            async def one(r):
+                if not r["text"]:
+                    return
+                ctx = f"这个 NPC 早前说过一句编造的话：「{r['fabricated']}」（设定里没有这回事）。\n玩家现在追问：「{r['question']}」"
+                got = await judge_obj.label("判断 NPC 对追问的回复属于哪一档", ctx, r["text"], JUDGE_LABELS)
+                if got:
+                    r["judge_verdict"], r["judge_reason"] = got
+
+            await asyncio.gather(*(one(r) for r in rows))
+            judge_stats = agreement([(r["verdict"], r["judge_verdict"]) for r in rows if r["text"]])
+            judge_stats["calls"], judge_stats["failures"] = judge_obj.calls, judge_obj.failures
+    return summarize(rows) | {"guard_model_available": guard_ready, "judge": judge_stats}, rows
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -142,6 +169,12 @@ def summarize(rows: list[dict]) -> dict:
         out[f"{cfg}/reinforced"] = rate("reinforced")
         out[f"{cfg}/corrected"] = rate("corrected")
         out[f"{cfg}/unclear"] = rate("unclear")
+        judged = [r for r in sub if r.get("judge_verdict")]
+        if judged:
+            jrate = lambda v: sum(r["judge_verdict"] == v for r in judged) / len(judged)  # noqa: E731
+            out[f"{cfg}/judge/reinforced"] = jrate("reinforced")
+            out[f"{cfg}/judge/corrected"] = jrate("corrected")
+            out[f"{cfg}/judge/unclear"] = jrate("unclear")
     return out
 
 
@@ -155,9 +188,17 @@ def render_table(summary: dict) -> str:
     lines = ["| 配置 | 顺着继续编（幻觉累积，越低越好） | 主动纠正/否认（越高越好） | 含糊带过 |", "|---|---|---|---|"]
     for cfg in CONFIGS:
         lines.append(
-            f"| {cfg} | {summary[f'{cfg}/reinforced']:.0%} "
+            f"| {cfg}（关键词判定） | {summary[f'{cfg}/reinforced']:.0%} "
             f"| {summary[f'{cfg}/corrected']:.0%} | {summary[f'{cfg}/unclear']:.0%} |"
         )
+        if f"{cfg}/judge/reinforced" in summary:
+            lines.append(
+                f"| {cfg}（LLM 裁判） | {summary[f'{cfg}/judge/reinforced']:.0%} "
+                f"| {summary[f'{cfg}/judge/corrected']:.0%} | {summary[f'{cfg}/judge/unclear']:.0%} |"
+            )
+    if summary.get("judge"):
+        lines.append("")
+        lines.append(render_agreement(summary["judge"], "三档判定"))
     return "\n".join(lines) + note
 
 
@@ -176,9 +217,10 @@ def render_answers(rows: list[dict]) -> str:
 async def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llm", choices=["offline", "real"], default="offline")
+    ap.add_argument("--judge", action="store_true", help="再让 LLM 裁判判一遍（只对 --llm real 有效）")
     ap.add_argument("--repeats", type=int, default=5)
     args = ap.parse_args()
-    summary, rows = await run(args.llm, args.repeats)
+    summary, rows = await run(args.llm, args.repeats, use_judge=args.judge)
     table = render_table(summary)
     note = "\n注意：offline 是假大模型，数字没有参考意义，只用来验证脚本本身能跑通。" if args.llm == "offline" else ""
     print(f"\nllm={args.llm} repeats={args.repeats}{note}\n\n{table}\n\n{render_answers(rows)}")
@@ -188,8 +230,13 @@ async def main() -> None:
         json.dumps({"args": vars(args), "summary": summary, "rows": rows}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    disagree = ""
+    if summary.get("judge"):
+        disagree = "\n\n关键词与裁判不一致的（该人工看的就是这些）：\n\n```\n" + render_disagreements(
+            rows, "verdict", "judge_verdict", "judge_reason", "text") + "\n```\n"
+        print(disagree)
     (RESULTS_DIR / f"{stamp}-hallucination-recall.md").write_text(
-        table + "\n\n```\n" + render_answers(rows) + "\n```\n", encoding="utf-8",
+        table + "\n\n```\n" + render_answers(rows) + "\n```\n" + disagree, encoding="utf-8",
     )
     print(f"\n已保存到 evals/results/{stamp}-hallucination-recall.(json|md)")
 
