@@ -68,7 +68,8 @@ def main() -> None:
     ap.add_argument("--epochs", type=float, default=3.0)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--batch-size", type=int, default=4)
-    ap.add_argument("--run-name", default="guard-v1", help="adapter 存到 adapters/<run-name>/")
+    ap.add_argument("--run-name", default="guard-v2", help="adapter 存到 adapters/<run-name>/")
+    ap.add_argument("--data-prefix", default="", help="读 data/<prefix>train.jsonl 和 <prefix>val.jsonl，比如 v2_")
     ap.add_argument("--limit", type=int, default=0, help="调试用：只取前 N 条训练数据跑一遍流程（0 = 不限制）")
     args = ap.parse_args()
 
@@ -93,8 +94,8 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     print("加载训练/验证数据 ...")
-    train_ds = build_dataset("train", tokenizer, args.limit)
-    val_ds = build_dataset("val", tokenizer, max(1, args.limit // 5) if args.limit else 0)
+    train_ds = build_dataset(args.data_prefix + "train", tokenizer, args.limit)
+    val_ds = build_dataset(args.data_prefix + "val", tokenizer, max(1, args.limit // 5) if args.limit else 0)
     print(f"  train: {len(train_ds)} 条   val: {len(val_ds)} 条")
 
     print(f"加载基座模型 {args.base} ...（第一次跑会从网上下载，之后会用本地缓存）")

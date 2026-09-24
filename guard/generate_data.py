@@ -36,8 +36,34 @@ def _dedup(rows: list[dict]) -> list[dict]:
     return out
 
 
+_PREFIX = ""
+
+
+def _shingles(text: str, k: int = 6) -> set[str]:
+    return {text[i:i + k] for i in range(max(0, len(text) - k + 1))}
+
+
+def _drop_overlapping(rows: list[dict], exclude_path: Path) -> list[dict]:
+    """留出集纪律：训练句子跟测试集任何一句有 6 字以上连续重合就丢。出题模型和造训练数据的
+    模型看的是同一份设定，很容易写出几乎一样的句子；不过滤，测试集就不是留出的。"""
+    import json as _json
+
+    data = _json.loads(exclude_path.read_text(encoding="utf-8"))
+    test = [_shingles(x["reply"]) for x in data["items"] if x.get("reply")]
+    kept, dropped = [], 0
+    for r in rows:
+        s = _shingles(r["reply"])
+        if any(s & t for t in test):
+            dropped += 1
+            continue
+        kept.append(r)
+    print(f"  留出集过滤：跟 {exclude_path.name} 有 6 字重合的训练句丢了 {dropped} 条")
+    return kept
+
+
 def _write(name: str, rows: list[dict]) -> None:
     DATA_DIR.mkdir(exist_ok=True)
+    name = _PREFIX + name
     path = DATA_DIR / f"{name}.jsonl"
     with path.open("w", encoding="utf-8") as f:
         for i, r in enumerate(rows):
@@ -51,19 +77,31 @@ def main() -> None:
     ap.add_argument("--train-per-topic", type=int, default=12, help="训练集：每个 主题×标签 组合生成几条")
     ap.add_argument("--test-per-topic", type=int, default=4, help="测试集：每个 主题×标签 组合生成几条（不需要很多）")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--prefix", default="", help="输出文件名前缀，比如 v2_ -> data/v2_train.jsonl；留空就覆盖原文件")
+    ap.add_argument("--train-only", action="store_true", help="只生成训练/验证集，不动两份留出测试集")
+    ap.add_argument("--exclude", type=Path, default=None,
+                    help="一个场景库 JSON（server/evals/scenarios/guard.json）：训练句子跟它里面任何一句"
+                         "有 6 字以上重合就丢掉，保证那份测试集是干净的留出集")
     args = ap.parse_args()
     random.seed(args.seed)
+    global _PREFIX
+    _PREFIX = args.prefix
 
-    print("[1/4] 生成训练数据来源：TownMind（3 个 NPC）+ 云雀酒店 ...")
+    print("[1/4] 生成训练数据来源：TownMind + 云雀酒店 ...")
     train_pool: list[dict] = []
     for spec in townmind.specs() + hotel.specs():
         train_pool += _gen_for_spec(spec, args.train_per_topic)
     train_pool = _dedup(train_pool)
+    if args.exclude:
+        train_pool = _drop_overlapping(train_pool, args.exclude)
     random.shuffle(train_pool)
     cut = max(1, int(len(train_pool) * 0.85))
     _write("train", train_pool[:cut])
     _write("val", train_pool[cut:])
 
+    if args.train_only:
+        print("[2/4] --train-only：两份留出测试集保持不动。")
+        return
     print("[2/4] 生成同领域留出测试集：TownMind，但用训练时没见过的编造主题 ...")
     indomain: list[dict] = []
     for spec in townmind.specs():

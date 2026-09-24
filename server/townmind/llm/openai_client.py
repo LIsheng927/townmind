@@ -15,6 +15,9 @@ class OpenAIClient:
         self.model = model or DEFAULT_MODEL
         self.client = AsyncOpenAI()  # 从环境变量 OPENAI_API_KEY 读取
         self.rate_limit_retries = 0  # 观察用：撞了几次 429 又重试成功的
+        # 一次回复最多多少 token。300 是给 NPC 一句台词 + 工具参数定的；批量出题（evals/gen_scenarios.py）
+        # 这种一次要几百上千 token 的调用方自己改大
+        self.max_tokens = 300
 
     async def _create_with_backoff(self, **kwargs):
         """429（每分钟 token 上限）按服务端给的等待时间退避重试，最多 RETRIES 次。
@@ -39,7 +42,7 @@ class OpenAIClient:
     async def choose_tool(self, system: str, user: str, tools: list[dict]) -> ToolCall:
         resp = await self._create_with_backoff(
             model=self.model,
-            max_tokens=300,
+            max_tokens=self.max_tokens,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             tools=[
                 {

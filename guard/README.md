@@ -20,7 +20,7 @@ guard/domains/    三个"世界"的具体设定：
                     townmind.py — 复用 server/townmind 的真实世界设定，是训练数据的主力
                     hotel.py    — 虚构的酒店礼宾机器人，训练时用，增加领域多样性
                     tutor.py    — 虚构的在线学习助教，只用来出"没见过的领域"这道考题，绝不参与训练
-guard/data/       生成出来的数据集（jsonl）
+guard/data/       生成出来的数据集（jsonl）；v2_ 前缀是补过盲区的第二版（见下面"v2"一节）
 guard/adapters/   训练出的 LoRA 权重（体积大，会被 gitignore）
 ```
 
@@ -86,6 +86,37 @@ guard/adapters/   训练出的 LoRA 权重（体积大，会被 gitignore）
 
 详细结果见 `eval_results.json`（汇总数字）和 `eval_details.json`（每一条的具体预测，用来做上面这种错误分析）。
 
+
+## v2：111 条干净样本把 v1 打回原形，按盲区补数据重训
+
+上面的 97.7% 是 v1 在自己那份留出测试集上的数字。后来 server 侧用 gpt-4o 生成、人工过了一遍的
+111 条场景（`server/evals/scenarios/guard.json`，53 条编造 + 58 条真话，v1 一句没见过）跑
+`server/evals/guard_fabrication.py`，v1 编造抓住率只有 **51%**。漏掉的 26 条排开看，学会的是
+"奇幻 = 编造"（王后御厨、海盗长抓得准），没学会"设定里没有 = 编造"（面包师公会、香橙粉、邻镇的
+校长、上周去邻镇吃晚宴——全放过）。回头看 `domains/townmind.py` 的编造主题：没有的地点 / 节日 /
+人物，写出来天然显眼，从没教过它平淡的编造。
+
+v2 改的只有数据：
+
+- `domains/townmind.py` 加 4 个编造主题（平淡的行会名 / 像正常原料的新东西 / 邻镇的普通人 /
+  自己经历过的设定外小事）+ 2 个 ok 主题（换说法复述设定里真有的事 / 不涉及设定外事物的琐事），
+  两边措辞一样平淡，模型只能靠背景资料来分；人设 3 → 5 个。
+- `generate_data.py --prefix v2_ --train-only --exclude ../server/evals/scenarios/guard.json`：
+  6 字 shingle 过滤掉跟回测集重叠的句子，两份原有留出测试集不动。884 训练 / 157 验证。
+- `train.py --data-prefix v2_ --run-name guard-v2`：超参没动（LoRA r=16 alpha=32、lr 2e-4 线性
+  衰减无预热、batch 4×累积 4、3 轮），RTX 5080 上 41 分钟，eval loss 0.037（v1 约 0.05）。
+
+| 111 条回测 | 准确率 | 编造抓住率（53） | 真话误伤率（58） |
+|---|---|---|---|
+| 正则 | 53% | 2% | 0% |
+| guard-v1 | 77% | 51% | 0% |
+| guard-v2 | 95% | 92% | 2% |
+| guard-v2 + NLI 证据否决 | 96% | 92% | 0% |
+
+v2 漏掉的 4 条里 3 条还是平淡行会名（这一类补了数据也只是从全漏到大部分抓住）；误伤的 1 条
+被 server 侧的 NLI 证据否决救回。要老实说：v2 的新主题是看着 111 条的漏判写的，句子没泄漏但
+类别分布是照着回测集补的，92% 是"修了已知盲区"，不是"泛化到未知盲区"——后者要再生成一批不看
+结果就定主题的场景。`server/townmind/guard_model.py` 的默认 adapter 已指到 `guard-v2`。
 
 ## 接入服务
 
