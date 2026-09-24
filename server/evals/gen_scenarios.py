@@ -11,6 +11,7 @@
 
 用法（在 server 目录下）：
   uv run python -m evals.gen_scenarios guard --n 60        # -> evals/scenarios/guard.json（60 编造 + 60 真话换说法）
+  uv run python -m evals.gen_scenarios guard-holdout --n 60  # -> guard-holdout.json：主题事先定死、跟 v2 训练主题不重叠，测泛化
   uv run python -m evals.gen_scenarios hearsay --n 30      # -> evals/scenarios/hearsay.json
   uv run python -m evals.gen_scenarios hallucination --n 20
   uv run python -m evals.gen_scenarios probes --n 30
@@ -85,30 +86,56 @@ SYSTEM = (
 )
 
 
-async def gen_guard(llm, n: int) -> list[dict]:
-    """编造检测：n 条编造（4 类均分）+ n 条真话换说法（每条对应一条设定）。"""
-    item = {"type": "object", "properties": {
-        "npc_id": {"type": "string", "enum": NPC_IDS}, "reply": {"type": "string"},
-        "note": {"type": "string", "description": "这条测什么，10 字内"}}, "required": ["npc_id", "reply", "note"]}
-    kinds = ["编造的机构/组织（学院、商会、王宫……）", "编造的人物（国王、法师、邻镇的谁……）",
-             "编造的事件/经历（被邀请去某处、拿了什么奖、跟设定外的人物或机构打过交道……）",
-             "编造的物品/食物（设定里没有的东西）"]
+GUARD_ITEM = {"type": "object", "properties": {
+    "npc_id": {"type": "string", "enum": NPC_IDS}, "reply": {"type": "string"},
+    "note": {"type": "string", "description": "这条测什么，10 字内"}}, "required": ["npc_id", "reply", "note"]}
+
+# 第一份场景库（guard.json）用的四类。guard-v2 的训练主题是看着这份的漏判补的，所以它只能回答
+# "已知盲区修好了吗"。
+GUARD_KINDS_V1 = ["编造的机构/组织（学院、商会、王宫……）", "编造的人物（国王、法师、邻镇的谁……）",
+                  "编造的事件/经历（被邀请去某处、拿了什么奖、跟设定外的人物或机构打过交道……）",
+                  "编造的物品/食物（设定里没有的东西）"]
+# 第二份（guard-holdout.json）：主题在看 v2 结果之前就定死，跟第一份、跟 v2 补的训练主题都不重叠，
+# 专门回答"没见过的编造类型还行吗"。改这个列表之前先想清楚是不是又在照着漏判补。
+GUARD_KINDS_HOLDOUT = ["编造的规矩/规定（镇上的税、宵禁、某个地方的使用规则、谁不许干什么……）",
+                       "编造的小镇历史（几十年前发过什么事、某个建筑是谁建的、以前有过什么……）",
+                       "编造别的 NPC 的私事（谁跟谁吵过架、谁的亲戚、谁欠谁钱、谁打算搬走……）",
+                       "编造的未来安排/承诺（下周要办什么、谁说要修什么、马上会涨价/降价……）"]
+
+
+async def _gen_guard(llm, n: int, kinds: list[str], chitchat: bool) -> list[dict]:
+    """编造检测：n 条编造（按 kinds 均分）+ n 条真话换说法；chitchat 再加 n//2 条不含任何事实断言的寒暄。"""
     out = []
     per = max(1, n // len(kinds))
     for k in kinds:
         items = await _ask(llm, SYSTEM + _setting_text(),
                            f"出 {{N}} 条 NPC 台词，每条都自然地提到一个【{k}】，要像 NPC 当真事说出口的样子，"
-                           f"不要带「听说」「好像」这类不确定措辞。分散在不同 NPC 身上，符合各自的性格口吻。"
-                           f"注意：编造指凭空造出设定外的机构、人物、地点、物品或承诺；「昨晚看到流星」「店里飞进一只鸟」"
+                           f"不要带「听说」「好像」这类不确定措辞。语气平淡，像在说一件日常的事，不要奇幻或夸张。"
+                           f"分散在不同 NPC 身上，符合各自的性格口吻。"
+                           f"注意：编造指凭空造出设定外的机构、人物、地点、物品、规矩、往事或承诺；「昨晚看到流星」「店里飞进一只鸟」"
                            f"这类无害的日常琐事不算编造，不要出。",
-                           _tool("fabricated", item, "编造类台词"), per, "reply")
+                           _tool("fabricated", GUARD_ITEM, "编造类台词"), per, "reply")
         out += [{**x, "expected": "fabricated", "kind": k} for x in items]
     items = await _ask(llm, SYSTEM + _setting_text(),
                        "出 {N} 条 NPC 台词，每条都是【设定里真有的一件事】，但换一种说法：口语化、第一人称、"
                        "改词序、加一点符合性格的语气，不要照抄设定原文。分散在不同 NPC 身上，每条设定至少用一次。",
-                       _tool("true_paraphrase", item, "真话换说法"), n, "reply")
+                       _tool("true_paraphrase", GUARD_ITEM, "真话换说法"), n, "reply")
     out += [{**x, "expected": "ok", "kind": "真话换说法"} for x in items]
+    if chitchat:
+        items = await _ask(llm, SYSTEM + _setting_text(),
+                           "出 {N} 条 NPC 台词，纯寒暄或聊心情：打招呼、问对方吃了没、抱怨累、说天气、招呼客人——"
+                           "**不包含任何可以核对真假的事实**（不提具体的人、机构、事件、物品来历）。分散在不同 NPC 身上。",
+                           _tool("chitchat", GUARD_ITEM, "纯寒暄"), max(1, n // 2), "reply")
+        out += [{**x, "expected": "ok", "kind": "纯寒暄"} for x in items]
     return out
+
+
+async def gen_guard(llm, n: int) -> list[dict]:
+    return await _gen_guard(llm, n, GUARD_KINDS_V1, chitchat=False)
+
+
+async def gen_guard_holdout(llm, n: int) -> list[dict]:
+    return await _gen_guard(llm, n, GUARD_KINDS_HOLDOUT, chitchat=True)
 
 
 async def gen_hearsay(llm, n: int) -> list[dict]:
@@ -153,7 +180,7 @@ async def gen_probes(llm, n: int) -> list[dict]:
                       _tool("probes", item, "探测题"), n, "question")
 
 
-GENERATORS = {"guard": gen_guard, "hearsay": gen_hearsay, "hallucination": gen_hallucination, "probes": gen_probes}
+GENERATORS = {"guard": gen_guard, "guard-holdout": gen_guard_holdout, "hearsay": gen_hearsay, "hallucination": gen_hallucination, "probes": gen_probes}
 
 
 async def main() -> None:

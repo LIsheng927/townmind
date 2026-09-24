@@ -49,6 +49,7 @@ class Scenario:
     reply: str
     expected: str  # "ok" 或 "fabricated"
     note: str  # 这条测的是什么
+    kind: str = ""  # 场景库里的出题类别（内置样本没有）
 
 
 SCENARIOS = [
@@ -91,7 +92,8 @@ def load_scenarios(path: Path) -> list[Scenario]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not data.get("reviewed"):
         print(f"警告：{path.name} 标着 reviewed=false，没人看过的题只能跑流程，不能拿来下结论。")
-    return [Scenario(x["npc_id"], x["reply"], x["expected"], x.get("note", x.get("kind", ""))) for x in data["items"]]
+    return [Scenario(x["npc_id"], x["reply"], x["expected"], x.get("note", x.get("kind", "")), x.get("kind", ""))
+            for x in data["items"]]
 
 
 def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None) -> tuple[dict, list[dict]]:
@@ -114,7 +116,7 @@ def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None
         else:
             combined = guard_label
         rows.append({
-            "npc_id": s.npc_id, "reply": s.reply, "expected": s.expected, "note": s.note,
+            "npc_id": s.npc_id, "reply": s.reply, "expected": s.expected, "note": s.note, "kind": s.kind,
             "regex_label": regex_label, "regex_correct": regex_label == s.expected,
             "guard_label": guard_label, "guard_correct": (guard_label == s.expected) if guard_ready else None,
             "nli_score": None if score is None else round(score, 3),
@@ -143,6 +145,13 @@ def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None
         "combined_accuracy": acc("combined_correct") if (guard_ready and grounding_ready) else None,
         "n": n, "n_fabricated": len(fab), "n_ok": len(ok),
         "adapter": guard.adapter_dir.name if guard_ready else None,
+        # 按出题类别拆：场景库里每类都是事先定的，哪一类漏得多一眼能看出来（内置 16 条没有 kind，这里为空）
+        "by_kind": {
+            k: {"n": len(g), "expected": g[0]["expected"],
+                "guard_correct": (sum(bool(r["guard_correct"]) for r in g) / len(g)) if guard_ready else None,
+                "combined_correct": (sum(bool(r["combined_correct"]) for r in g) / len(g)) if (guard_ready and grounding_ready) else None}
+            for k, g in _group_by_kind(rows).items()
+        },
         "split": {
             "regex": split("regex_label"),
             "guard": split("guard_label") if guard_ready else (None, None),
@@ -151,6 +160,14 @@ def run(scenarios: list[Scenario] | None = None, adapter_dir: Path | None = None
         },
     }
     return summary, rows
+
+
+def _group_by_kind(rows: list[dict]) -> dict[str, list[dict]]:
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        if r.get("kind"):
+            groups.setdefault(r["kind"], []).append(r)
+    return groups
 
 
 def _pct(v) -> str:
@@ -179,6 +196,10 @@ def render_table(summary: dict) -> str:
         ]
     else:
         lines.append("| 带依据的 NLI 核查 | 不可用（模型没下到，或没装 sentencepiece） |")
+    if summary.get("by_kind"):
+        lines += ["", "| 出题类别 | 条数 | 期望 | guard 判对 | guard+证据 判对 |", "|---|---|---|---|---|"]
+        for k, g in summary["by_kind"].items():
+            lines.append(f"| {k} | {g['n']} | {g['expected']} | {_pct(g['guard_correct'])} | {_pct(g['combined_correct'])} |")
     return "\n".join(lines)
 
 
