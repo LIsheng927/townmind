@@ -123,3 +123,35 @@ def test_leak_report():
     assert r["said"] == 2 and r["audited"] == 2 and r["suspect"] == 1 and r["leak_rate"] == 0.5
     assert r["per_npc"]["alice"]["suspect_texts"] == ["魔法学院昨天请我去教魔法面包"]
     assert leak_report({"bob": MemoryStore()})["leak_rate"] is None
+
+
+def test_audit_recall_eval_plants_and_scores_without_touching_disk(tmp_path):
+    """evals/audit_recall.py：把场景库的 reply 种进记忆、审完按 expected 算召回和误伤；什么都不落盘。"""
+    import asyncio
+
+    from evals.audit_recall import load_stores, plant, summarize
+
+    s = alice_store()
+    (tmp_path / "alice.json").write_text("", encoding="utf-8")
+    s.save(tmp_path / "alice.json")
+    before = (tmp_path / "alice.json").read_bytes()
+    stores = load_stores(tmp_path)
+    items = [
+        {"npc_id": "alice", "reply": "面包店八点关门，这是规定", "expected": "fabricated", "kind": "规矩"},
+        {"npc_id": "alice", "reply": "法棍刚出炉", "expected": "ok", "kind": "真话"},
+        {"npc_id": "bob", "reply": "镇长欠我钱", "expected": "fabricated", "kind": "私事"},
+    ]
+    planted = plant(stores, items, NOW + 100)
+    # 原有没审过的"自己说过的话"被封存成 ok，不会跟着送审
+    assert all(m.audited for m in stores["alice"].memories[:-2])
+    llm = ScriptedAuditLLM([
+        ToolCall("audit_memories", {"verdicts": ["suspect", "suspect"]}),  # alice：两条都判 suspect → 一抓住一误伤
+        ToolCall("audit_memories", {"verdicts": ["ok"]}),                   # bob：漏了
+    ])
+    auditor = MemoryAuditor(llm)
+    asyncio.run(auditor.audit_stores(stores, paths={}))
+    summary, rows = summarize(planted, auditor, "fake", tmp_path / "bank.json", "test")
+    assert summary["recall"] == 0.5 and summary["false_positive"] == 1.0
+    assert summary["by_kind"]["规矩"]["recall"] == 1.0 and summary["by_kind"]["私事"]["recall"] == 0.0
+    assert summary["by_kind"]["真话"]["false_positive"] == 1.0
+    assert (tmp_path / "alice.json").read_bytes() == before  # 没落盘
