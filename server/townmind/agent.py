@@ -113,6 +113,7 @@ RUNTIME_BOOL_FLAGS = (
     "verify_and_revise",
     "reflexion_lessons",
     "memory_audit",
+    "audit_evidence_veto",
 )
 
 # "自己以前说过的话"这类记忆固定长这样（见 _remember 里 to_add.append 那几行），用来把
@@ -359,6 +360,9 @@ class Agent:
         memory_audit: bool = False,  # 后台用强模型重审"自己说过的话"（见 auditor.py）。开着时：回忆里
         # 审过判 suspect 的直接按可疑注入、审过判 ok 的跳过本地 guard、还没审的标"尚未核实"。
         # 这个开关只管 Agent 这边"怎么用审核结论"；审核循环本身由 main.py 起（要配审核模型）
+        audit_evidence_veto: bool = False,  # 审核判 suspect 的，进注入前再过一道 NLI 证据否决。默认关是
+        # 数据定的：同一份 94 条题，gpt-5.5 审核 + NLI 是 97%→94% 召回、误伤 2% 不变（救回 0 条、误放 1 条）；
+        # 真实 90 条上 NLI 推翻 0 条。换便宜的 gpt-5.4-mini 当审核器时值得开：100%/10% → 97%/3%（README）
         use_relationships: bool = False,  # 给每个人单独记一份好感/信任，影响语气和愿不愿意把事告诉他；
         # 每场对话结束后多一次 LLM 调用（跟反思、动态重要度一样是可选的增强），默认关，方便做消融对比
         compress_conversations: bool = False,  # 对话结束时把这场的逐句流水账压成一条摘要。
@@ -400,6 +404,7 @@ class Agent:
         self.verify_and_revise = verify_and_revise
         self.reflexion_lessons = reflexion_lessons
         self.memory_audit = memory_audit
+        self.audit_evidence_veto = audit_evidence_veto
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
         self.assertive_sharing = assertive_sharing
@@ -830,9 +835,11 @@ class Agent:
         _build_prompt 里 suspect_said 那段。
 
         开了 memory_audit 之后，先看后台强模型的审核结论（Memory.audited）：
-          suspect → 不再问本地 guard（它就是漏掉这句的那个模型），但依据核查照走：真实数据
-                    审了 90 条、判 7 条 suspect，人工复核 4 条是误判，其中两条（"面粉涨了三成"
-                    "小镇治安一向很好"）设定原文就写着——正是 NLI 证据否决最拿手的那种字面蕴含；
+          suspect → 不再问本地 guard（它就是漏掉这句的那个模型）。要不要再过 NLI 证据否决由
+                    audit_evidence_veto 定：量过，审核器是 gpt-5.5 时 NLI 救不回它的误伤（都是带
+                    "小尾巴"的口语句，蕴含 0.00）、还会误放一条（"货郎不能在同一条街叫卖两次"
+                    蕴含 0.99，三次评测它都放这条），净负；审核器换成便宜的 mini 时误伤多、NLI
+                    能救回大半，净正。所以默认关，配 mini 时开；
           ok      → 直接放行，省一次 guard 推理；
           ""      → 还没审到，维持原样问本地 guard。
         这是前门/后门用同一个模型那个漏洞的补法：前门漏过去的，后门换个更强的眼睛再看。
@@ -849,8 +856,9 @@ class Agent:
             if self.memory_audit and m.audited:
                 if m.audited == "suspect":
                     self.stats["suspect_from_audit"] += 1
-                    if not await self._evidence_vetoes(npc_id, said):
-                        flagged.append((m, said))
+                    if self.audit_evidence_veto and await self._evidence_vetoes(npc_id, said):
+                        continue
+                    flagged.append((m, said))
                 else:
                     self.stats["guard_skipped_by_audit"] += 1
                 continue

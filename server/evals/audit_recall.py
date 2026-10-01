@@ -23,6 +23,11 @@ suspect 算误伤。按 kind 分组看哪类编造它抓得住、哪类抓不住
   uv run python -m evals.audit_recall --scenarios evals/scenarios/guard.json
   uv run python -m evals.audit_recall --model gpt-5.4-mini             # 换审核模型
   uv run python -m evals.audit_recall --empty                           # 不用真实记忆当依据
+  uv run python -m evals.audit_recall --model gpt-5.4-mini --nli       # 再加一道 NLI 证据否决（服务里就是这么组合的）
+
+--nli 做的事跟 agent._flag_suspect_said_memories 里一样：审核器判 suspect 的，再用 NLI 看设定/人设能不能推出
+这句话，蕴含过 VETO_THRESHOLD 就推翻。要装 guard-model 依赖组（第一次会下载 2.2GB 的 XNLI 模型）。
+结果表多一行"审核器 + NLI 否决"：看它救回几条误伤、又误放几条编造。
 """
 from __future__ import annotations
 
@@ -37,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 
 from townmind.auditor import ENV_MODEL, AUDITED_SUSPECT, MemoryAuditor, make_audit_client
+from townmind.grounding import VETO_THRESHOLD, GroundingChecker
 from townmind.memory import Memory, MemoryStore
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -78,7 +84,21 @@ def plant(stores: dict[str, MemoryStore], items: list[dict], now: float, reaudit
     return planted
 
 
-def summarize(planted: list[tuple[dict, Memory]], auditor: MemoryAuditor, model: str, bank: Path, base: str) -> tuple[dict, list[dict]]:
+def apply_nli(rows: list[dict], grounding: GroundingChecker) -> None:
+    """给每行补上 NLI 否决之后的结论：flagged 且设定能推出 → 推翻。只对 flagged 的算（跟服务里一样，
+    NLI 只在判编造时出面），没 flagged 的 nli_score 留 None。"""
+    for r in rows:
+        r["nli_score"] = None
+        r["flagged_after_nli"] = r["flagged"]
+        if r["flagged"]:
+            score = grounding.supported(r["npc_id"], r["reply"])
+            r["nli_score"] = score
+            if score is not None and score >= VETO_THRESHOLD:
+                r["flagged_after_nli"] = False
+
+
+def summarize(planted: list[tuple[dict, Memory]], auditor: MemoryAuditor, model: str, bank: Path, base: str,
+              grounding: GroundingChecker | None = None) -> tuple[dict, list[dict]]:
     rows = []
     for it, m in planted:
         rows.append({
@@ -86,6 +106,8 @@ def summarize(planted: list[tuple[dict, Memory]], auditor: MemoryAuditor, model:
             "kind": it.get("kind", ""), "audited": m.audited,
             "flagged": m.audited == AUDITED_SUSPECT,
         })
+    if grounding is not None:
+        apply_nli(rows, grounding)
     fab = [r for r in rows if r["expected"] == "fabricated"]
     ok = [r for r in rows if r["expected"] == "ok"]
     unaudited = [r for r in rows if not r["audited"]]
@@ -103,6 +125,11 @@ def summarize(planted: list[tuple[dict, Memory]], auditor: MemoryAuditor, model:
         "fabricated": len(fab), "ok": len(ok),
         "recall": (sum(r["flagged"] for r in fab) / len(fab)) if fab else None,
         "false_positive": (sum(r["flagged"] for r in ok) / len(ok)) if ok else None,
+        "nli": grounding is not None,
+        "recall_nli": (sum(r["flagged_after_nli"] for r in fab) / len(fab)) if (fab and grounding is not None) else None,
+        "false_positive_nli": (sum(r["flagged_after_nli"] for r in ok) / len(ok)) if (ok and grounding is not None) else None,
+        "nli_rescued": sum(1 for r in rows if grounding is not None and r["flagged"] and not r["flagged_after_nli"] and r["expected"] == "ok"),
+        "nli_let_through": sum(1 for r in rows if grounding is not None and r["flagged"] and not r["flagged_after_nli"] and r["expected"] == "fabricated"),
         "unaudited": len(unaudited),
         "by_kind": by_kind,
         "audit_calls": auditor.stats["audit_calls"], "audit_failures": auditor.stats["audit_failures"],
@@ -133,6 +160,14 @@ def render_table(s: dict) -> str:
         "| | 编造抓住率（召回） | 真话误伤率 |",
         "|---|---|---|",
         f"| 审核器（{s['model']}） | **{_pct(s['recall'])}** | **{_pct(s['false_positive'])}** |",
+    ]
+    if s.get("nli"):
+        lines.append(
+            f"| 审核器 + NLI 证据否决 | **{_pct(s['recall_nli'])}** | **{_pct(s['false_positive_nli'])}** |"
+        )
+        lines.append("")
+        lines.append(f"NLI 救回误伤 {s['nli_rescued']} 条，误放编造 {s['nli_let_through']} 条（阈值 {VETO_THRESHOLD}）。")
+    lines += [
         "",
         "| 题型 | 条数 | 编造抓住率 | 真话误伤率 |",
         "|---|---|---|---|",
@@ -146,22 +181,34 @@ def render_rows(rows: list[dict]) -> str:
     out = []
     for r in rows:
         mark = "✓" if r["flagged"] == (r["expected"] == "fabricated") else "✗"
-        out.append(f"{mark} [{r['expected']:<10}] {r['npc_id']:<6} {r['audited'] or '(未审)':<8} {r['reply']}")
+        nli = ""
+        if r.get("nli_score") is not None:
+            verdict = "推翻" if not r["flagged_after_nli"] else "维持"
+            nli = f"  NLI 蕴含 {r['nli_score']:.2f} → {verdict}"
+        out.append(f"{mark} [{r['expected']:<10}] {r['npc_id']:<6} {r['audited'] or '(未审)':<8} {r['reply']}{nli}")
     return "\n".join(out)
 
 
-async def run(items: list[dict], memory_dir: Path | None, model: str | None, reaudit_existing: bool) -> tuple[dict, list[dict]]:
+async def run(items: list[dict], memory_dir: Path | None, model: str | None, reaudit_existing: bool,
+              nli: bool = False) -> tuple[dict, list[dict]]:
     if model:
         os.environ[ENV_MODEL] = model
     llm = make_audit_client()
     if llm is None:
         print("没配审核模型（需要 .env 里的 API key）", file=sys.stderr)
         sys.exit(2)
+    grounding = None
+    if nli:
+        grounding = GroundingChecker()
+        if not grounding.available:
+            print("NLI 不可用：先 `uv sync --group guard-model`（第一次会下载约 2.2GB 的 XNLI 模型）", file=sys.stderr)
+            sys.exit(2)
     auditor = MemoryAuditor(llm)
     stores = load_stores(memory_dir)
     planted = plant(stores, items, time.time(), reaudit_existing)
     await auditor.audit_stores(stores, paths={}, reaudit=False)  # paths 为空：什么都不落盘
-    return summarize(planted, auditor, getattr(llm, "model", str(model)), Path("bank"), "空记忆" if memory_dir is None else f"真实记忆 {memory_dir.name}/")
+    return summarize(planted, auditor, getattr(llm, "model", str(model)), Path("bank"),
+                     "空记忆" if memory_dir is None else f"真实记忆 {memory_dir.name}/", grounding)
 
 
 def main() -> None:
@@ -171,9 +218,10 @@ def main() -> None:
     ap.add_argument("--memory-dir", type=Path, default=DEFAULT_MEMORY_DIR, help="种进哪份真实记忆当依据")
     ap.add_argument("--empty", action="store_true", help="种进空记忆，不用真实记忆当依据")
     ap.add_argument("--reaudit-existing", action="store_true", help="真实记忆里原有的自己说过的话也一起重审（多花钱）")
+    ap.add_argument("--nli", action="store_true", help="审核器判 suspect 的再过一道 NLI 证据否决（跟服务里的组合一样）")
     args = ap.parse_args()
     items = load_bank(args.scenarios)
-    summary, rows = asyncio.run(run(items, None if args.empty else args.memory_dir, args.model, args.reaudit_existing))
+    summary, rows = asyncio.run(run(items, None if args.empty else args.memory_dir, args.model, args.reaudit_existing, args.nli))
     summary["bank"] = args.scenarios.name
     table = render_table(summary)
     print(f"\n{table}\n\n{render_rows(rows)}")

@@ -79,6 +79,9 @@ app.state.agent = Agent(
     # 审核器真的起来了才开：开关开着、审核器没起来，提示词里会给每条自己说过的话都标
     # "尚未核实"，而永远不会有人去核实——那是误导，不是保护
     memory_audit=_auditor is not None,
+    # 审核判 suspect 的再过一道 NLI 否决。默认关（gpt-5.5 审核下净负，见 README）；审核器换成
+    # gpt-5.4-mini 省钱时开，要同时开 TOWNMIND_USE_GROUNDING
+    audit_evidence_veto=_env_flag("TOWNMIND_AUDIT_EVIDENCE_VETO"),
 )
 
 

@@ -622,15 +622,23 @@ def test_audited_suspect_is_injected_without_asking_local_guard():
     assert guard.calls == []
 
 
-def test_audited_suspect_can_still_be_overruled_by_evidence():
-    """审核模型也会误判（真实数据 7 条 suspect 里 4 条是误判，两条设定原文就写着）：
-    依据核查这道保险对审核结论同样生效，设定能推出这句话就不注入。"""
+def test_audited_suspect_evidence_veto_is_opt_in():
+    """审核判 suspect 的要不要再过 NLI 否决，由 audit_evidence_veto 定。默认关：审核器是 gpt-5.5 时
+    量出来 NLI 净负（救回 0、误放 1）；审核器换成便宜的 mini 时开（误伤 10% → 3%）。"""
     from townmind.grounding import VETO_THRESHOLD
 
     llm = RecordingLLM([ToolCall("idle", {})])
     a = _agent_with_said_memory(llm, guard=None, audited="suspect")
     a.grounding = _FakeGrounding(VETO_THRESHOLD + 0.1)
-    decide(a)
+    decide(a)  # 默认关：有 grounding 也不问它，照常注入
+    assert "系统核对发现" in llm.systems[0]
+    assert a.stats["guard_overruled_by_evidence"] == 0
+
+    llm = RecordingLLM([ToolCall("idle", {})])
+    a = _agent_with_said_memory(llm, guard=None, audited="suspect")
+    a.grounding = _FakeGrounding(VETO_THRESHOLD + 0.1)
+    a.set_flags(audit_evidence_veto=True)
+    decide(a)  # 开了：设定能推出这句话就不注入
     assert "系统核对发现" not in llm.systems[0]
     assert a.stats["suspect_from_audit"] == 1 and a.stats["guard_overruled_by_evidence"] == 1
 

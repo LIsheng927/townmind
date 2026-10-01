@@ -312,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", action="store_true", help="真的调用审核模型；不加只统计")
     ap.add_argument("--reaudit", action="store_true", help="已审过的也重审（换了审核模型时用）")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出报告")
+    ap.add_argument("--nli", action="store_true", help="对每条 suspect 再算一遍 NLI 证据否决会不会推翻它（只报告，不改文件）")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -329,6 +330,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"审了 {n} 条；调用 {auditor.stats['audit_calls']} 次，失败 {auditor.stats['audit_failures']} 次，"
               f"tokens in/out {auditor.stats['audit_tokens_in']}/{auditor.stats['audit_tokens_out']}")
     report = leak_report(stores)
+    nli_notes: dict[str, str] = {}
+    if args.nli:
+        # 服务里 suspect 进注入之前要过的那道保险，这里离线算一遍给人看：哪条会被设定推翻。
+        # 不写回 audited——否决是回忆时现算的，不是审核结论的一部分
+        from .grounding import VETO_THRESHOLD, GroundingChecker
+
+        g = GroundingChecker()
+        if not g.available:
+            print("NLI 不可用：先 `uv sync --group guard-model`", file=sys.stderr)
+            return 2
+        for npc_id, r in report["per_npc"].items():
+            for t in r["suspect_texts"]:
+                score = g.supported(npc_id, t)
+                verdict = "-" if score is None else ("推翻" if score >= VETO_THRESHOLD else "维持")
+                nli_notes[t] = f"  NLI 蕴含 {score:.2f} → {verdict}" if score is not None else "  NLI -"
+        report["nli_overruled"] = sum(1 for n in nli_notes.values() if n.endswith("推翻"))
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
@@ -336,11 +353,13 @@ def main(argv: list[str] | None = None) -> int:
     for npc_id, r in report["per_npc"].items():
         print(f"{npc_id:<12}{r['said']:>8}{r['audited']:>6}{r['suspect']:>9}")
         for t in r["suspect_texts"]:
-            print(f"    ✗ {t}")
+            print(f"    ✗ {t}{nli_notes.get(t, '')}")
     rate = report["leak_rate"]
     print(f"合计：自己说的 {report['said']} 条，已审 {report['audited']} 条，suspect {report['suspect']} 条，"
           f"泄漏率 {rate:.1%}" if rate is not None else
           f"合计：自己说的 {report['said']} 条，还没有审过任何一条（加 --run 开始审）")
+    if args.nli:
+        print(f"NLI 证据否决会推翻其中 {report['nli_overruled']} 条（回忆时现算，不改审核结论）")
     return 0
 
 
