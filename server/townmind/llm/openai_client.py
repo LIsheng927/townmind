@@ -42,7 +42,9 @@ class OpenAIClient:
     async def choose_tool(self, system: str, user: str, tools: list[dict]) -> ToolCall:
         resp = await self._create_with_backoff(
             model=self.model,
-            max_tokens=self.max_tokens,
+            # max_completion_tokens 是 max_tokens 的新名字：gpt-4o 两个都收，GPT-5 系列只收新的
+            # （推理 token 也算在这个上限里，所以推理模型要把 self.max_tokens 调大，见 auditor.make_audit_client）
+            max_completion_tokens=self.max_tokens,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             tools=[
                 {

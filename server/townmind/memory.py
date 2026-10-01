@@ -189,6 +189,15 @@ class Memory:
     # 变成了什么样"就能直接查出来，不用靠文本相似度去猜（那种猜法一转述就失效）。
     # 空字符串 = 不属于任何被追踪的消息，也就是绝大多数日常记忆。
     topic: str = ""
+    # 异步审核的结论（只对"自己以前说过的话"这类记忆有意义，其它记忆恒为空串）：
+    #   ""        还没审过（刚写进来、或者没开审核）
+    #   "ok"      强模型审过，跟设定对得上
+    #   "suspect" 强模型审过，判定是编造——以后被想起时直接按"可疑"处理，不再问本地 guard
+    # 为什么要有这个字段：前门（输出检查）和后门（回忆时核对）用的是同一个 guard 分类器，
+    # 前门漏过去的编造，后门拿同一个模型再看一遍，大概率还是漏——同一个模型不会因为多问
+    # 一次就变聪明。所以后门换一个更强、但慢得多的模型，离线、批量、不卡决策地把存进来的
+    # 话重新审一遍，结论写回这里（见 auditor.py）。
+    audited: str = ""
     # 归一化之后的 numpy 行向量，写入时算好，检索时直接做矩阵乘。
     #
     # 为什么不直接把 numpy 数组存进上面的 embedding 字段：dataclass 自动生成的 __eq__ 会
@@ -504,6 +513,7 @@ class MemoryStore:
                 "age_seconds": round(now - m.time, 1),
                 "importance": m.importance,
                 "people": sorted(m.people),
+                "audited": m.audited,
             }
             for m in newest
         ]
@@ -525,6 +535,7 @@ class MemoryStore:
                     "hop": m.hop,
                     "topic": m.topic,
                     "told_to": sorted(m.told_to),
+                    "audited": m.audited,
                 }
                 for m in self.memories
             ],
@@ -564,6 +575,8 @@ class MemoryStore:
                     told_to=frozenset(d.get("told_to", ())),
                     # 老文件没有这个字段，兜底成空串 = 不属于任何被追踪的消息
                     topic=d.get("topic", ""),
+                    # 老文件没有这个字段，兜底成空串 = 还没审过；开了审核的话下一轮会补审
+                    audited=d.get("audited", ""),
                 )
                 for d in data["memories"]
             ]

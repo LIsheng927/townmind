@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from . import world
 from .agent import Agent
+from .auditor import ENV_ENABLE as ENV_AUDIT, ENV_INTERVAL as ENV_AUDIT_INTERVAL, MemoryAuditor, make_audit_client
 from .grounding import ENV_ENABLE as ENV_GROUNDING, GroundingChecker
 from .guard_model import ENV_ENABLE, GuardModel
 from .llm.embeddings import make_embedder
@@ -41,6 +42,15 @@ _grounding = GroundingChecker() if (_guard_model is not None and os.getenv(ENV_G
 # 语义记忆检索的 embedding 客户端：同样是可选的，没配 OPENAI_API_KEY 时 make_embedder()
 # 返回 None，记忆的"相关度"评分自动退化成旧版的"认不认人"，不影响服务启动（见 llm/embeddings.py）。
 _embedder = make_embedder()
+# 记忆的后台审核（auditor.py）：用强模型离线重审"自己说过的话"，补前门/后门同一个 guard
+# 的漏洞。要配审核模型的 key（跟主模型同一套 provider），没配就跳过并记一条日志。
+_auditor = None
+if _env_flag(ENV_AUDIT):
+    _audit_llm = make_audit_client()
+    if _audit_llm is None:
+        log.warning("%s 开着但没配审核模型的 key，记忆审核不启动", ENV_AUDIT)
+    else:
+        _auditor = MemoryAuditor(_audit_llm)
 # 几个可选增强，一律默认关、设了对应环境变量才打开：它们要么多花一次 LLM 调用，要么
 # 改变 NPC 的行为，关掉时服务的表现跟加这些功能之前完全一致，方便做消融对比。
 # 各自的说明见 agent.py 里对应的方法：_rate_importance / _maybe_reflect /
@@ -66,7 +76,21 @@ app.state.agent = Agent(
     # 接上不等于打开，不填就是关的。
     verify_and_revise=_env_flag("TOWNMIND_VERIFY_AND_REVISE"),
     reflexion_lessons=_env_flag("TOWNMIND_REFLEXION_LESSONS"),
+    # 审核器真的起来了才开：开关开着、审核器没起来，提示词里会给每条自己说过的话都标
+    # "尚未核实"，而永远不会有人去核实——那是误导，不是保护
+    memory_audit=_auditor is not None,
 )
+
+
+@app.on_event("startup")
+async def _start_memory_audit() -> None:
+    """审核循环挂在事件循环上、跟请求处理并发跑：它只碰记忆文件，不碰 WebSocket。
+    决策链路（decide）上一行都没加——审核慢、贵，放后台正是为了不让它拖慢在线对话。"""
+    if _auditor is None:
+        return
+    interval = float(os.getenv(ENV_AUDIT_INTERVAL) or 30.0)
+    app.state.audit_task = asyncio.create_task(_auditor.run_forever(app.state.agent, interval=interval))
+    log.info("记忆审核已启动：每 %.0f 秒审一轮", interval)
 
 
 # 网页 demo 挂在根路径上：服务一起来，浏览器打开 http://127.0.0.1:8000/ 就能玩，

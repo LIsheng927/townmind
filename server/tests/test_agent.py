@@ -502,9 +502,11 @@ class RecordingLLM:
     def __init__(self, calls):
         self.calls = list(calls)
         self.systems = []
+        self.users = []
 
     async def choose_tool(self, system, user, tools):
         self.systems.append(system)
+        self.users.append(user)
         return self.calls.pop(0)
 
 
@@ -591,6 +593,86 @@ def test_suspect_said_check_exception_degrades_gracefully():
     result = decide(a)  # 不该抛异常、不该整个决策失败
     assert result["name"] == "idle"
     assert "系统核对发现" not in llm.systems[1]
+
+
+# ---------- 后台审核结论（Memory.audited）怎么进决策 ----------
+def _agent_with_said_memory(llm, guard=None, audited="", memory_audit=True):
+    """alice 已经有一条"自己说过的话"，审核结论预先写好；下一轮决策把它想起来。"""
+    clock = FakeClock()
+    a = Agent(llm, clock=clock, distrust_own_memory=True, guard_model=guard, memory_audit=memory_audit)
+    a._mem("alice").add("你对Bob说了「魔法学院要请你去教魔法面包」", IMPORTANCE_SAID, clock.t - 5, people={"bob"})
+    a._mem("alice").memories[-1].audited = audited
+    return a
+
+
+def test_audited_suspect_is_injected_without_asking_local_guard():
+    """强模型已经判了 suspect：直接按可疑注入，本地 guard 一次都不该再问——它就是漏掉这句的那个模型。
+    没配 guard_model 也一样生效（审核这一路不依赖本地 guard）。"""
+    llm = RecordingLLM([ToolCall("idle", {})])
+    a = _agent_with_said_memory(llm, guard=None, audited="suspect")
+    decide(a)
+    assert "系统核对发现" in llm.systems[0] and "魔法学院要请你去教魔法面包" in llm.systems[0]
+    assert a.stats["suspect_from_audit"] == 1
+
+    llm = RecordingLLM([ToolCall("idle", {})])
+    guard = StubGuardModel("ok")
+    a = _agent_with_said_memory(llm, guard=guard, audited="suspect")
+    decide(a)
+    assert "系统核对发现" in llm.systems[0]
+    assert guard.calls == []
+
+
+def test_audited_suspect_can_still_be_overruled_by_evidence():
+    """审核模型也会误判（真实数据 7 条 suspect 里 4 条是误判，两条设定原文就写着）：
+    依据核查这道保险对审核结论同样生效，设定能推出这句话就不注入。"""
+    from townmind.grounding import VETO_THRESHOLD
+
+    llm = RecordingLLM([ToolCall("idle", {})])
+    a = _agent_with_said_memory(llm, guard=None, audited="suspect")
+    a.grounding = _FakeGrounding(VETO_THRESHOLD + 0.1)
+    decide(a)
+    assert "系统核对发现" not in llm.systems[0]
+    assert a.stats["suspect_from_audit"] == 1 and a.stats["guard_overruled_by_evidence"] == 1
+
+
+def test_audited_ok_skips_local_guard_and_has_no_tag():
+    llm = RecordingLLM([ToolCall("idle", {})])
+    guard = StubGuardModel("fabricated")  # 就算本地 guard 想拦，强模型放行的也不再问它
+    a = _agent_with_said_memory(llm, guard=guard, audited="ok")
+    decide(a)
+    assert guard.calls == []
+    assert "系统核对发现" not in llm.systems[0]
+    assert "尚未核实" not in llm.users[0]
+    assert a.stats["guard_skipped_by_audit"] == 1
+
+
+def test_unaudited_self_said_is_tagged_and_still_checked_by_local_guard():
+    """还没审到的：维持原样问本地 guard，提示词里多一句"尚未核实"的标记。"""
+    llm = RecordingLLM([ToolCall("idle", {})])
+    guard = StubGuardModel("ok")
+    a = _agent_with_said_memory(llm, guard=guard, audited="")
+    decide(a)
+    assert ("alice", "魔法学院要请你去教魔法面包") in guard.calls
+    assert "魔法学院要请你去教魔法面包」（你自己说过的，尚未核实）" in llm.users[0]  # 回忆列表在 user 段
+
+
+def test_audit_flag_off_ignores_audited_field():
+    """memory_audit 关着（默认）：audited 字段完全不起作用——行为跟加这个功能之前一模一样，
+    评测基线不变；提示词里也没有"尚未核实"（没人去核实的话，标了就是误导）。"""
+    llm = RecordingLLM([ToolCall("idle", {})])
+    guard = StubGuardModel("ok")
+    a = _agent_with_said_memory(llm, guard=guard, audited="suspect", memory_audit=False)
+    decide(a)
+    assert ("alice", "魔法学院要请你去教魔法面包") in guard.calls  # 还是问本地 guard
+    assert "系统核对发现" not in llm.systems[0]
+    assert "尚未核实" not in llm.users[0]
+
+
+def test_memory_audit_is_a_runtime_flag():
+    a = Agent(None)
+    assert a.flags()["memory_audit"] is False
+    a.set_flags(memory_audit=True)
+    assert a.memory_audit is True
 
 
 # ---------- Chain-of-Verification 式：guard 拦下的回复先重试一次，而不是直接兜底 ----------

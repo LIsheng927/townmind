@@ -29,3 +29,4 @@ guard/.venv/
 guard/adapters/
 guard/__pycache__/
 guard/**/__pycache__/
+_to_delete/

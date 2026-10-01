@@ -524,3 +524,24 @@ def test_conversation_summaries_and_reflections_are_not_gossip():
     assert s.shareable("carol", NOW, k=5) == []
     s.add("集市的米价涨了三成", 9, NOW, {"player"})
     assert [m.text for m in s.shareable("carol", NOW, k=5)] == ["集市的米价涨了三成"]
+
+
+def test_audited_field_round_trips_and_defaults_to_empty(tmp_path):
+    """审核结论要跟着记忆一起落盘：审过的话重启之后不该再审一遍（审核是花钱的）。
+    老文件没这个字段 → 空串 = 还没审过。"""
+    import json
+
+    s = carol_store()
+    s.memories[0].audited = "suspect"
+    s.memories[1].audited = "ok"
+    path = tmp_path / "carol.json"
+    s.save(path)
+    loaded = MemoryStore.load(path)
+    assert [m.audited for m in loaded.memories[:3]] == ["suspect", "ok", ""]
+
+    old = tmp_path / "old.json"
+    old.write_text(
+        json.dumps({"met": [], "memories": [{"text": "老格式", "time": NOW, "importance": 5, "people": []}]}),
+        encoding="utf-8",
+    )
+    assert MemoryStore.load(old).memories[0].audited == ""

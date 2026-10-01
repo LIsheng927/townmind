@@ -112,6 +112,7 @@ RUNTIME_BOOL_FLAGS = (
     "expressive_dialogue",
     "verify_and_revise",
     "reflexion_lessons",
+    "memory_audit",
 )
 
 # "自己以前说过的话"这类记忆固定长这样（见 _remember 里 to_add.append 那几行），用来把
@@ -355,6 +356,9 @@ class Agent:
         # 被拦下的具体内容让大模型重说一次，只重试一次；多一次 LLM 调用，默认关，等真实数据验证效果
         reflexion_lessons: bool = False,  # Reflexion 式：guard 分类器实锤一次编造之后，额外存一条高重要度的
         # "教训"记忆，让这次纠正靠语义检索在未来别的话题里也可能被想起，不只在当轮起效；默认关，等真实数据验证效果
+        memory_audit: bool = False,  # 后台用强模型重审"自己说过的话"（见 auditor.py）。开着时：回忆里
+        # 审过判 suspect 的直接按可疑注入、审过判 ok 的跳过本地 guard、还没审的标"尚未核实"。
+        # 这个开关只管 Agent 这边"怎么用审核结论"；审核循环本身由 main.py 起（要配审核模型）
         use_relationships: bool = False,  # 给每个人单独记一份好感/信任，影响语气和愿不愿意把事告诉他；
         # 每场对话结束后多一次 LLM 调用（跟反思、动态重要度一样是可选的增强），默认关，方便做消融对比
         compress_conversations: bool = False,  # 对话结束时把这场的逐句流水账压成一条摘要。
@@ -395,6 +399,7 @@ class Agent:
         self.expressive_dialogue = expressive_dialogue
         self.verify_and_revise = verify_and_revise
         self.reflexion_lessons = reflexion_lessons
+        self.memory_audit = memory_audit
         self.use_relationships = use_relationships
         self.use_gossip = use_gossip
         self.assertive_sharing = assertive_sharing
@@ -824,14 +829,32 @@ class Agent:
         说过 X，这不在设定里"）就是另一回事了。这个方法只做判断，不改提示词，具体怎么用见
         _build_prompt 里 suspect_said 那段。
 
-        没开 distrust_own_memory、没配 guard_model（没装可选依赖或者没有训练好的 adapter）
-        时，调用方根本不会走到这里（见 decide()），这里再判一次纯粹是防御性的，双重保险。"""
-        if self.guard_model is None or not self.distrust_own_memory:
+        开了 memory_audit 之后，先看后台强模型的审核结论（Memory.audited）：
+          suspect → 不再问本地 guard（它就是漏掉这句的那个模型），但依据核查照走：真实数据
+                    审了 90 条、判 7 条 suspect，人工复核 4 条是误判，其中两条（"面粉涨了三成"
+                    "小镇治安一向很好"）设定原文就写着——正是 NLI 证据否决最拿手的那种字面蕴含；
+          ok      → 直接放行，省一次 guard 推理；
+          ""      → 还没审到，维持原样问本地 guard。
+        这是前门/后门用同一个模型那个漏洞的补法：前门漏过去的，后门换个更强的眼睛再看。
+
+        没开 distrust_own_memory 时什么都不查。没配 guard_model 时（没装可选依赖或者没有
+        训练好的 adapter），只剩审核结论这一路——没开审核就还是空列表，跟以前一样。"""
+        if not self.distrust_own_memory:
             return []
         flagged = []
         for m in recalled:
             said = _self_said_text(m.text)
             if said is None:
+                continue
+            if self.memory_audit and m.audited:
+                if m.audited == "suspect":
+                    self.stats["suspect_from_audit"] += 1
+                    if not await self._evidence_vetoes(npc_id, said):
+                        flagged.append((m, said))
+                else:
+                    self.stats["guard_skipped_by_audit"] += 1
+                continue
+            if self.guard_model is None:
                 continue
             try:
                 label = await asyncio.to_thread(self.guard_model.classify, npc_id, said)
@@ -1588,6 +1611,17 @@ class Agent:
             names.append("follow_player")
         return _tool_schemas(tuple(names))
 
+    def _recall_tag(self, m: Memory) -> str:
+        """提示词里每条回忆后面跟的标记。传闻标"听来的传闻"（整条传播链上防幻觉的一环）；
+        开了审核时，自己说过、还没被强模型审过的话标"尚未核实"——它跟"自己说的话未必属实"
+        那条通用元规则是一回事，只是落到了具体某一条上。审过判 ok 的不标（已经核实），
+        判 suspect 的不在这里标，而是进 suspect_said 那段更强的指令（见 _build_prompt）。"""
+        if m.hop >= 1:
+            return "（听来的传闻）"
+        if self.memory_audit and not m.audited and _self_said_text(m.text) is not None:
+            return "（你自己说过的，尚未核实）"
+        return ""
+
     def _build_prompt(
         self, npc_id, heard, nearby, recalled: list[Memory], now: float,
         relevant_town_facts=None, suspect_said: list[tuple[Memory, str]] = (), revise_hint: str | None = None,
@@ -1704,7 +1738,7 @@ class Agent:
             # 听来的消息标出来：这是整条传播链上真正防幻觉的一环——不标的话，NPC 会把传了
             # 几手的传闻当成亲眼所见，言之凿凿地再传下去，跟"编造不存在的事"造成的观感一样。
             lines += [
-                f"- {format_age(now - m.time)}：{m.text}" + ("（听来的传闻）" if m.hop >= 1 else "")
+                f"- {format_age(now - m.time)}：{m.text}" + self._recall_tag(m)
                 for m in recalled
             ]
             if any(m.hop >= 1 for m in recalled):
