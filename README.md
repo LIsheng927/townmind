@@ -1,5 +1,7 @@
 # TownMind
 
+**中文** · [English](README.en.md)
+
 LLM 驱动的 AI NPC 系统：**Unity 小镇（身体）+ Python Agent 服务端（大脑）**。
 十个 NPC 各有性格、记忆、人际关系和工作地点，能自主行动、互相对话，也会把听来的消息传给别人；大模型不可用时，行为树接管，NPC 依然像样地生活。
 
@@ -65,7 +67,7 @@ flowchart LR
 | 实验台 | `web_demo/`：运行时开关（`POST /flags`）、传话追踪（`/rumor/{topic}`）、召回解释（`/recall/{npc}`）、成本计数；同一个小镇上当场做 A/B |
 | 鲁棒性 | 8s 超时 → 行为树兜底；**熔断器**（连续 3 次失败停止请求 30s，再试探恢复）；**并发上限**（同时最多 4 个请求，排队不丢） |
 | 评测 | 无头仿真 + 消融对比 + 多 seed 聚合 + 逐句审计 + 探测题（见下） |
-| 工程 | Docker / docker compose、GitHub Actions（测试 + 评测流程冒烟 + 镜像健康检查）、352 个单元测试 |
+| 工程 | Docker / docker compose、GitHub Actions（测试 + 评测流程冒烟 + 镜像健康检查）、366 个单元测试 |
 
 ## 实验台：四轮真实运行修出来的传播链
 
